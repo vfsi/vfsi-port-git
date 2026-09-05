@@ -32,6 +32,7 @@
 #include "strvec.h"
 #include "tempfile.h"
 #include "tmp-objdir.h"
+#include "vfsi.h"
 
 static int get_conv_flags(unsigned flags)
 {
@@ -1116,6 +1117,15 @@ int for_each_loose_file_in_source(struct odb_source *source,
 {
 	struct strbuf buf = STRBUF_INIT;
 	int r;
+
+	r = vfsi_for_each_loose_file(source->path,
+				     source->odb->repo->hash_algo,
+				     obj_cb, cruft_cb, subdir_cb, data);
+	if (r != 0) {
+		if (r < 0)
+			return -1;
+		return 0;
+	}
 
 	strbuf_addstr(&buf, source->path);
 	for (int i = 0; i < 256; i++) {

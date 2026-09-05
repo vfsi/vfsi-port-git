@@ -1376,6 +1376,7 @@ LIB_OBJS += wildmatch.o
 LIB_OBJS += worktree.o
 LIB_OBJS += wrapper.o
 LIB_OBJS += write-or-die.o
+LIB_OBJS += vfsi.o
 LIB_OBJS += ws.o
 LIB_OBJS += wt-status.o
 LIB_OBJS += xdiff-interface.o
