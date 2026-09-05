@@ -5,52 +5,29 @@
 #include "object-file.h"
 #include "strbuf.h"
 #include "strvec.h"
-#include "vfsi.h"
+#include "git-vfsi.h"
+#include <vfsi.h>
 
 #include <dlfcn.h>
 
-/* Minimal ABI mirrors of vfsi-c/include/vfsi.h. */
-struct vfsi_fs;
-
-struct vfsi_attrs {
-	uint32_t ftype;
-	uint32_t mode;
-	uint64_t size;
-	uint32_t nlink;
-	uint64_t fileid;
-	uint32_t uid;
-	uint32_t gid;
-	uint64_t blocks;
-	int64_t atime_sec;
-	uint32_t atime_nsec;
-	int64_t mtime_sec;
-	uint32_t mtime_nsec;
-	int64_t ctime_sec;
-	uint32_t ctime_nsec;
-};
-
-typedef int (*vfsi_listdir_cb)(const char *name,
-			       const struct vfsi_attrs *attrs,
-			       void *userdata);
-typedef int (*vfsi_listdirv_cb)(const char *dir,
-				const char *name,
-				const struct vfsi_attrs *attrs,
-				void *userdata);
-typedef int (*vfsi_read_paths_cb)(const char *path,
-				  const unsigned char *data,
-				  size_t len,
-				  void *userdata);
-
 struct vfsi_bindings {
 	void *handle;
+	uint32_t (*abi_version)(void);
 	int (*dummy_open_mount)(const char *, const char *, struct vfsi_fs **);
-	int (*nfs_open_mount)(const char *, const char *, struct vfsi_fs **);
+	int (*nfs_open_mount_export)(const char *, const char *, const char *,
+				     struct vfsi_fs **);
 	int (*listdir)(struct vfsi_fs *, const char *, vfsi_listdir_cb, void *);
 	int (*listdirv)(struct vfsi_fs *, const char *const *, size_t,
-			size_t, int, vfsi_listdirv_cb, void *);
+			size_t, bool, vfsi_listdirv_cb, void *);
 	int (*read_paths)(struct vfsi_fs *, const char *const *, size_t,
 			  vfsi_read_paths_cb, void *);
 	void (*free)(struct vfsi_fs *);
+};
+
+enum vfsi_loader_state {
+	VFSI_LOADER_UNINITIALIZED,
+	VFSI_LOADER_AVAILABLE,
+	VFSI_LOADER_UNAVAILABLE,
 };
 
 static struct vfsi_context {
@@ -58,6 +35,7 @@ static struct vfsi_context {
 	struct vfsi_fs *fs;
 	char *mountpoint;
 	int cleanup_registered;
+	enum vfsi_loader_state loader_state;
 } vfsi_ctx;
 
 enum {
@@ -132,56 +110,134 @@ static int load_symbol(void *handle, const char *name, void **out)
 	return 0;
 }
 
-static int vfsi_mountpoint_for(const char *path, char **mountpoint_out)
+static int load_vfsi_bindings(const char *library)
 {
+	struct vfsi_bindings candidate = { 0 };
+	uint32_t version;
+
+	if (vfsi_ctx.loader_state == VFSI_LOADER_AVAILABLE)
+		return 1;
+	if (vfsi_ctx.loader_state == VFSI_LOADER_UNAVAILABLE)
+		return 0;
+
+	candidate.handle = dlopen(library, RTLD_NOW | RTLD_LOCAL);
+	if (!candidate.handle) {
+		warning(_("vfsi: cannot load %s: %s"), library, dlerror());
+		goto unavailable;
+	}
+#define LOAD_VFSI(name, field) do { \
+	void *sym; \
+	if (load_symbol(candidate.handle, name, &sym) < 0) \
+		goto unavailable; \
+	memcpy(&(field), &sym, sizeof(sym)); \
+} while (0)
+	LOAD_VFSI("vfsi_abi_version", candidate.abi_version);
+	version = candidate.abi_version();
+	if (version != VFSI_ABI_VERSION) {
+		warning(_("vfsi: ABI version %"PRIu32" is incompatible with required version %u"),
+			version, VFSI_ABI_VERSION);
+		goto unavailable;
+	}
+	LOAD_VFSI("vfsi_dummy_open_mount", candidate.dummy_open_mount);
+	LOAD_VFSI("vfsi_nfs_open_mount_export", candidate.nfs_open_mount_export);
+	LOAD_VFSI("vfsi_listdir", candidate.listdir);
+	LOAD_VFSI("vfsi_listdirv", candidate.listdirv);
+	LOAD_VFSI("vfsi_read_paths", candidate.read_paths);
+	LOAD_VFSI("vfsi_free", candidate.free);
+#undef LOAD_VFSI
+
+	vfsi_ctx.bindings = candidate;
+	vfsi_ctx.loader_state = VFSI_LOADER_AVAILABLE;
+	if (!vfsi_ctx.cleanup_registered) {
+		atexit(vfsi_cleanup);
+		vfsi_ctx.cleanup_registered = 1;
+	}
+	return 1;
+
+unavailable:
+	if (candidate.handle)
+		dlclose(candidate.handle);
+	vfsi_ctx.loader_state = VFSI_LOADER_UNAVAILABLE;
+	return 0;
+}
+
+struct vfsi_mount {
+	char *mountpoint;
+	char *host;
+	char *export_root;
+};
+
+static void vfsi_mount_clear(struct vfsi_mount *mount)
+{
+	free(mount->mountpoint);
+	free(mount->host);
+	free(mount->export_root);
+	memset(mount, 0, sizeof(*mount));
+}
+
+#ifdef __linux__
+static void unescape_mount_field(char *field)
+{
+	char *src = field;
+	char *dst = field;
+
+	while (*src) {
+		if (src[0] == '\\' && src[1] >= '0' && src[1] <= '7' &&
+		    src[2] >= '0' && src[2] <= '7' &&
+		    src[3] >= '0' && src[3] <= '7') {
+			*dst++ = ((src[1] - '0') << 6) |
+				 ((src[2] - '0') << 3) | (src[3] - '0');
+			src += 4;
+		} else {
+			*dst++ = *src++;
+		}
+	}
+	*dst = '\0';
+}
+#endif
+
+static int vfsi_mount_for(const char *path, struct vfsi_mount *result)
+{
+#ifdef __linux__
 	FILE *fp;
-	char line[4096];
-	char *best = NULL;
+	char line[8192];
 	size_t best_len = 0;
 
 	fp = fopen("/proc/self/mounts", "r");
 	if (!fp)
 		return 0;
 	while (fgets(line, sizeof(line), fp)) {
-		char *p = line;
-		char *mount = NULL;
-		char *fstype = NULL;
+		char source[4096], mountpoint[4096], fstype[64];
+		char *export_sep;
 		size_t len;
 
-		while (*p == ' ' || *p == '\t')
-			p++;
-		while (*p && *p != ' ' && *p != '\t')
-			p++;
-		while (*p == ' ' || *p == '\t')
-			p++;
-		mount = p;
-		while (*p && *p != ' ' && *p != '\t')
-			p++;
-		if (*p) {
-			*p++ = '\0';
-			while (*p == ' ' || *p == '\t')
-				p++;
-			fstype = p;
-			while (*p && *p != ' ' && *p != '\t')
-				p++;
-			if (*p)
-				*p = '\0';
-		}
-		if (!mount || !fstype)
+		if (sscanf(line, "%4095s %4095s %63s", source, mountpoint,
+			   fstype) != 3)
 			continue;
 		if (strcmp(fstype, "nfs") && strcmp(fstype, "nfs4"))
 			continue;
-		len = strlen(mount);
-		if (len <= best_len || !starts_with(path, mount) ||
-		    (path[len] != '/' && path[len] != '\0'))
+		unescape_mount_field(source);
+		unescape_mount_field(mountpoint);
+		len = strlen(mountpoint);
+		if (len <= best_len || !starts_with(path, mountpoint) ||
+		    (len != 1 && path[len] != '/' && path[len] != '\0'))
 			continue;
-		free(best);
-		best = xstrdup(mount);
+		export_sep = strstr(source, ":/");
+		if (!export_sep)
+			continue;
+		vfsi_mount_clear(result);
+		result->mountpoint = xstrdup(mountpoint);
+		result->host = xmemdupz(source, export_sep - source);
+		result->export_root = xstrdup(export_sep + 1);
 		best_len = len;
 	}
 	fclose(fp);
-	*mountpoint_out = best;
-	return best != NULL;
+	return result->mountpoint != NULL;
+#else
+	(void)path;
+	(void)result;
+	return 0;
+#endif
 }
 
 static int open_vfsi(const char *objects_path)
@@ -189,8 +245,10 @@ static int open_vfsi(const char *objects_path)
 	struct vfsi_bindings *b = &vfsi_ctx.bindings;
 	const char *impl = getenv("VFSI_IMPL");
 	const char *library = getenv("VFSI_LIBRARY");
-	char *mountpoint = NULL;
-	const char *host;
+	struct vfsi_mount mount = { 0 };
+	const char *host_override;
+	const char *export_override;
+	const char *mount_override;
 	const char *dummy_root;
 	const char *dummy_mount;
 	int rc;
@@ -200,40 +258,14 @@ static int open_vfsi(const char *objects_path)
 	if (strcmp(impl, "nfs") && strcmp(impl, "dummy"))
 		return 0;
 
-	if (!b->handle) {
-		b->handle = dlopen(library, RTLD_NOW | RTLD_LOCAL);
-		if (!b->handle) {
-			warning(_("vfsi: cannot load %s: %s"), library, dlerror());
-			return 0;
-		}
-#define LOAD_VFSI(name, field) do { \
-	void *sym; \
-	if (load_symbol(b->handle, name, &sym) < 0) { \
-		vfsi_cleanup(); \
-		return 0; \
-	} \
-	memcpy(&(field), &sym, sizeof(sym)); \
-} while (0)
-		LOAD_VFSI("vfsi_dummy_open_mount", b->dummy_open_mount);
-		LOAD_VFSI("vfsi_nfs_open_mount", b->nfs_open_mount);
-	LOAD_VFSI("vfsi_listdir", b->listdir);
-	LOAD_VFSI("vfsi_listdirv", b->listdirv);
-	LOAD_VFSI("vfsi_read_paths", b->read_paths);
-	LOAD_VFSI("vfsi_free", b->free);
-#undef LOAD_VFSI
-		if (!vfsi_ctx.cleanup_registered) {
-			atexit(vfsi_cleanup);
-			vfsi_ctx.cleanup_registered = 1;
-		}
-	}
+	if (!load_vfsi_bindings(library))
+		return 0;
 
 	if (!strcmp(impl, "dummy")) {
 		dummy_root = getenv("VFSI_ROOT");
 		dummy_mount = getenv("VFSI_MOUNT");
-		if (!dummy_root || !dummy_mount) {
-			vfsi_cleanup();
+		if (!dummy_root || !dummy_mount)
 			return 0;
-		}
 		if (vfsi_ctx.fs) {
 			b->free(vfsi_ctx.fs);
 			vfsi_ctx.fs = NULL;
@@ -243,19 +275,37 @@ static int open_vfsi(const char *objects_path)
 		vfsi_ctx.mountpoint = xstrdup(dummy_mount);
 		rc = b->dummy_open_mount(dummy_root, dummy_mount, &vfsi_ctx.fs);
 	} else {
-		if (!vfsi_mountpoint_for(objects_path, &mountpoint)) {
-			vfsi_cleanup();
-			return 0;
+		host_override = getenv("VFSI_HOST");
+		export_override = getenv("VFSI_EXPORT");
+		mount_override = getenv("VFSI_MOUNT");
+		if (!vfsi_mount_for(objects_path, &mount)) {
+			if (!mount_override || !export_override)
+				return 0;
+			mount.mountpoint = xstrdup(mount_override);
+			mount.export_root = xstrdup(export_override);
+			mount.host = xstrdup(host_override ? host_override : "127.0.0.1");
+		}
+		if (host_override) {
+			free(mount.host);
+			mount.host = xstrdup(host_override);
+		}
+		if (export_override) {
+			free(mount.export_root);
+			mount.export_root = xstrdup(export_override);
+		}
+		if (mount_override) {
+			free(mount.mountpoint);
+			mount.mountpoint = xstrdup(mount_override);
 		}
 		if (vfsi_ctx.fs) {
 			b->free(vfsi_ctx.fs);
 			vfsi_ctx.fs = NULL;
 		}
 		free(vfsi_ctx.mountpoint);
-		vfsi_ctx.mountpoint = mountpoint;
-		host = getenv("VFSI_HOST");
-		rc = b->nfs_open_mount(host ? host : "127.0.0.1",
-				       vfsi_ctx.mountpoint, &vfsi_ctx.fs);
+		vfsi_ctx.mountpoint = xstrdup(mount.mountpoint);
+		rc = b->nfs_open_mount_export(mount.host, mount.export_root,
+					      mount.mountpoint, &vfsi_ctx.fs);
+		vfsi_mount_clear(&mount);
 	}
 	if (rc) {
 		warning(_("vfsi: open failed: %d"), rc);
@@ -274,8 +324,6 @@ struct vfsi_walk {
 	struct strvec display_subdirs;
 	const char *display_root;
 	const char *real_root;
-	int error;
-	int stop;
 };
 
 static int is_hexpair(const char *s)
@@ -292,17 +340,17 @@ static int cmp_subdir_ptr(const void *a, const void *b)
 	return strcmp(*pa, *pb);
 }
 
-static int collect_subdir_cb(const char *name, const struct vfsi_attrs *attrs,
-			     void *userdata)
+static bool collect_subdir_cb(const char *name, const struct vfsi_attrs *attrs,
+			      void *userdata)
 {
 	struct vfsi_walk *walk = userdata;
 
 	if (attrs->ftype != VFSI_NF4DIR || !is_hexpair(name))
-		return 1;
+		return true;
 	strvec_pushf(&walk->subdirs, "%s/%s", walk->real_root, name);
 	strvec_pushf(&walk->display_subdirs, "%s/%s",
 		     walk->display_root, name);
-	return 1;
+	return true;
 }
 
 static int process_loose_entry(struct vfsi_walk *walk,
@@ -336,10 +384,6 @@ static int process_loose_entry(struct vfsi_walk *walk,
 		rc = walk->cruft_cb(name, path, walk->data);
 	}
 	free(path);
-	if (rc) {
-		walk->error = rc;
-		walk->stop = 1;
-	}
 	return rc;
 }
 
@@ -373,22 +417,22 @@ static struct vfsi_object *vfsi_object_add(const char *display_dir,
 	return obj;
 }
 
-static int loose_entry_cb(const char *dir, const char *name,
-			  const struct vfsi_attrs *attrs,
-			  void *userdata)
+static bool loose_entry_cb(const char *dir, const char *name,
+			   const struct vfsi_attrs *attrs,
+			   void *userdata)
 {
 	struct vfsi_walk *walk = userdata;
 	const char *display_dir = display_dir_for_real(walk, dir);
 	char *display_path;
 
 	if (!display_dir)
-		return 1;
+		return true;
 	if (!strcmp(name, ".") || !strcmp(name, ".."))
-		return 1;
+		return true;
 	display_path = xstrfmt("%s/%s", display_dir, name);
 	vfsi_object_add(display_dir, display_path, dir, name, attrs);
 	free(display_path);
-	return 1;
+	return true;
 }
 
 static struct vfsi_object *vfsi_find_object(const char *path)
@@ -403,19 +447,20 @@ static struct vfsi_object *vfsi_find_object(const char *path)
 	return NULL;
 }
 
-static int vfsi_store_read_paths_cb(const char *path, const unsigned char *data,
-				    size_t len, void *userdata)
+static bool vfsi_store_read_paths_cb(const char *path,
+				     const unsigned char *data,
+				     size_t len, void *userdata)
 {
 	struct vfsi_object *obj = vfsi_find_object(path);
 
 	(void)userdata;
 	if (!obj)
-		return 1;
+		return true;
 	free(obj->data);
 	obj->data = xmalloc(len ? len : 1);
 	memcpy(obj->data, data, len);
 	obj->data_len = len;
-	return 1;
+	return true;
 }
 
 static int vfsi_prefetch_object_data(void)
@@ -445,24 +490,6 @@ static int vfsi_prefetch_object_data(void)
 	return rc;
 }
 
-static int object_cmp(const void *a, const void *b)
-{
-	const struct vfsi_object *oa = a;
-	const struct vfsi_object *ob = b;
-	int cmp;
-
-	cmp = strcmp(oa->display_dir, ob->display_dir);
-	if (cmp)
-		return cmp;
-	return strcmp(oa->name, ob->name);
-}
-
-static void vfsi_sort_objects(void)
-{
-	qsort(vfsi_objects, vfsi_objects_nr, sizeof(*vfsi_objects),
-	      object_cmp);
-}
-
 static void vfsi_attrs_to_stat(const struct vfsi_attrs *attrs, struct stat *st)
 {
 	memset(st, 0, sizeof(*st));
@@ -479,12 +506,9 @@ static void vfsi_attrs_to_stat(const struct vfsi_attrs *attrs, struct stat *st)
 	st->st_gid = attrs->gid;
 	st->st_size = attrs->size;
 	st->st_blocks = attrs->blocks;
-	st->st_atim.tv_sec = attrs->atime_sec;
-	st->st_atim.tv_nsec = attrs->atime_nsec;
-	st->st_mtim.tv_sec = attrs->mtime_sec;
-	st->st_mtim.tv_nsec = attrs->mtime_nsec;
-	st->st_ctim.tv_sec = attrs->ctime_sec;
-	st->st_ctim.tv_nsec = attrs->ctime_nsec;
+	st->st_atime = attrs->atime_sec;
+	st->st_mtime = attrs->mtime_sec;
+	st->st_ctime = attrs->ctime_sec;
 }
 
 int vfsi_fill_stat(const char *path, struct stat *st)
@@ -514,7 +538,7 @@ static int vfsi_for_each_loose_file_locked(const char *objects_dir,
 					   each_loose_object_fn obj_cb,
 					   each_loose_cruft_fn cruft_cb,
 					   each_loose_subdir_fn subdir_cb,
-					   void *data)
+					   void *data, int *result)
 {
 	struct vfsi_walk walk = {
 		.algop = algop,
@@ -528,6 +552,8 @@ static int vfsi_for_each_loose_file_locked(const char *objects_dir,
 	size_t i;
 	const char **dirs = NULL;
 	int rc;
+
+	*result = 0;
 
 	real_objects = real_pathdup(objects_dir, 0);
 	if (!real_objects)
@@ -562,8 +588,6 @@ static int vfsi_for_each_loose_file_locked(const char *objects_dir,
 	qsort(dirs, walk.subdirs.nr, sizeof(*dirs), cmp_subdir_ptr);
 	rc = vfsi_ctx.bindings.listdirv(vfsi_ctx.fs, dirs, walk.subdirs.nr,
 					0, 0, loose_entry_cb, &walk);
-	free(dirs);
-	dirs = NULL;
 	if (rc) {
 		error(_("vfsi: listdirv failed"));
 		goto fail;
@@ -572,33 +596,35 @@ static int vfsi_for_each_loose_file_locked(const char *objects_dir,
 		error(_("vfsi: unable to prefetch loose objects"));
 		goto fail;
 	}
-	vfsi_sort_objects();
-	for (i = 0; i < vfsi_objects_nr; i++) {
-		struct vfsi_object *obj = &vfsi_objects[i];
-		int obj_rc;
-
-		if (walk.stop)
-			break;
-		obj_rc = process_loose_entry(&walk, obj->display_dir, obj->name);
-		if (obj_rc && !walk.stop)
-			break;
-	}
-	if (walk.stop)
-		goto fail;
-
+	/* Replay each directory in numeric order. Within a directory, retain the
+	 * backend's READDIR order, and invoke subdir_cb immediately after its
+	 * entries, matching for_each_file_in_obj_subdir(). */
 	for (i = 0; i < walk.subdirs.nr; i++) {
-		const char *dir = walk.display_subdirs.v[i];
+		const char *dir = display_dir_for_real(&walk, dirs[i]);
 		const char *slash = strrchr(dir, '/');
+		size_t j;
 		unsigned nr;
 
+		for (j = 0; j < vfsi_objects_nr; j++) {
+			struct vfsi_object *obj = &vfsi_objects[j];
+
+			if (strcmp(obj->display_dir, dir))
+				continue;
+			*result = process_loose_entry(&walk, obj->display_dir,
+						      obj->name);
+			if (*result)
+				goto handled;
+		}
 		if (!slash || !subdir_cb)
 			continue;
 		nr = (unsigned)hexval_table[(unsigned char)slash[1]];
 		nr = (nr << 4) | hexval_table[(unsigned char)slash[2]];
-		if (subdir_cb(nr, dir, data))
-			break;
+		*result = subdir_cb(nr, dir, data);
+		if (*result)
+			goto handled;
 	}
 
+handled:
 done:
 	rc = 1;
 	goto out;
@@ -617,9 +643,11 @@ int vfsi_for_each_loose_file(const char *objects_dir,
 			     each_loose_object_fn obj_cb,
 			     each_loose_cruft_fn cruft_cb,
 			     each_loose_subdir_fn subdir_cb,
-			     void *data)
+			     void *data, int *result)
 {
+	if (!result)
+		BUG("vfsi_for_each_loose_file requires a result pointer");
 	return vfsi_for_each_loose_file_locked(objects_dir, algop,
 					       obj_cb, cruft_cb,
-					       subdir_cb, data);
+					       subdir_cb, data, result);
 }

@@ -14,7 +14,7 @@
 #include "quote.h"
 #include "packfile.h"
 #include "object-file.h"
-#include "vfsi.h"
+#include "git-vfsi.h"
 
 static unsigned long garbage;
 static off_t size_garbage;

@@ -18,7 +18,7 @@
 #include "object-name.h"
 #include "odb.h"
 #include "shallow.h"
-#include "vfsi.h"
+#include "git-vfsi.h"
 
 static const char * const prune_usage[] = {
 	N_("git prune [-n] [-v] [--progress] [--expire <time>] [--] [<head>...]"),

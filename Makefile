@@ -460,6 +460,14 @@ include shared.mak
 # Define EXPAT_NEEDS_XMLPARSE_H if you have an old version of expat (e.g.,
 # 1.1 or 1.2) that provides xmlparse.h instead of expat.h.
 
+# === Optional library: vfsi-c ===
+#
+# Define USE_VFSI to enable the experimental vectorized filesystem integration.
+# Set VFSI_CFLAGS to the compiler flags needed to find vfsi-c's public vfsi.h
+# (for example, -I/path/to/vnfs/vfsi-c/include). Set VFSI_LIBS when the local
+# platform needs an additional library for dlopen()/dlsym() (usually -ldl).
+# Without USE_VFSI, portable inline stubs retain Git's normal filesystem path.
+#
 # === Optional library: libcurl ===
 #
 # Define NO_CURL if you do not have libcurl installed.  git-http-fetch and
@@ -1376,7 +1384,11 @@ LIB_OBJS += wildmatch.o
 LIB_OBJS += worktree.o
 LIB_OBJS += wrapper.o
 LIB_OBJS += write-or-die.o
+ifdef USE_VFSI
+BASIC_CFLAGS += -DUSE_VFSI $(VFSI_CFLAGS)
+EXTLIBS += $(VFSI_LIBS)
 LIB_OBJS += vfsi.o
+endif
 LIB_OBJS += ws.o
 LIB_OBJS += wt-status.o
 LIB_OBJS += xdiff-interface.o

@@ -15,7 +15,7 @@
 #include "repository.h"
 #include "strbuf.h"
 #include "tempfile.h"
-#include "vfsi.h"
+#include "git-vfsi.h"
 #include "write-or-die.h"
 
 static int append_loose_object(const struct object_id *oid,
