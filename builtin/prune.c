@@ -18,6 +18,7 @@
 #include "object-name.h"
 #include "odb.h"
 #include "shallow.h"
+#include "vfsi.h"
 
 static const char * const prune_usage[] = {
 	N_("git prune [-n] [-v] [--progress] [--expire <time>] [--] [<head>...]"),
@@ -90,7 +91,7 @@ static int prune_object(const struct object_id *oid, const char *fullpath,
 	if (is_object_reachable(oid, revs))
 		return 0;
 
-	if (lstat(fullpath, &st)) {
+	if (!vfsi_fill_stat(fullpath, &st) && lstat(fullpath, &st)) {
 		/* report errors, but do not stop pruning */
 		error("Could not stat '%s'", fullpath);
 		return 0;
