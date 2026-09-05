@@ -186,25 +186,18 @@ static int open_vfsi(const char *objects_path)
 			vfsi_cleanup();
 			return 0;
 		}
-		if (vfsi_ctx.fs && vfsi_ctx.mountpoint &&
-		    !strcmp(vfsi_ctx.mountpoint, dummy_mount))
-			return 1;
 		if (vfsi_ctx.fs) {
 			b->free(vfsi_ctx.fs);
 			vfsi_ctx.fs = NULL;
 		}
 		free(vfsi_ctx.mountpoint);
+		vfsi_ctx.mountpoint = NULL;
 		vfsi_ctx.mountpoint = xstrdup(dummy_mount);
 		rc = b->dummy_open_mount(dummy_root, dummy_mount, &vfsi_ctx.fs);
 	} else {
 		if (!vfsi_mountpoint_for(objects_path, &mountpoint)) {
 			vfsi_cleanup();
 			return 0;
-		}
-		if (vfsi_ctx.fs && vfsi_ctx.mountpoint &&
-		    !strcmp(vfsi_ctx.mountpoint, mountpoint)) {
-			free(mountpoint);
-			return 1;
 		}
 		if (vfsi_ctx.fs) {
 			b->free(vfsi_ctx.fs);
@@ -241,6 +234,14 @@ static int is_hexpair(const char *s)
 {
 	return isxdigit((unsigned char)s[0]) &&
 	       isxdigit((unsigned char)s[1]) && s[2] == '\0';
+}
+
+static int cmp_subdir_ptr(const void *a, const void *b)
+{
+	const char *const *pa = a;
+	const char *const *pb = b;
+
+	return strcmp(*pa, *pb);
 }
 
 static int collect_subdir_cb(const char *name, const struct vfsi_attrs *attrs,
@@ -336,7 +337,7 @@ static int vfsi_for_each_loose_file_locked(const char *objects_dir,
 	};
 	char *real_objects;
 	size_t i;
-	const char **dirs;
+	const char **dirs = NULL;
 	int rc;
 
 	real_objects = real_pathdup(objects_dir, 0);
@@ -362,9 +363,17 @@ static int vfsi_for_each_loose_file_locked(const char *objects_dir,
 	if (!walk.subdirs.nr)
 		goto done;
 
-	dirs = walk.subdirs.v;
+	dirs = xcalloc(walk.subdirs.nr, sizeof(*dirs));
+	for (i = 0; i < walk.subdirs.nr; i++)
+		dirs[i] = walk.subdirs.v[i];
+	/* Match the normal implementation's numeric subdirectory order
+	 * (objects/00 … objects/ff), which fsck relies on when it learns
+	 * object types while scanning. */
+	qsort(dirs, walk.subdirs.nr, sizeof(*dirs), cmp_subdir_ptr);
 	rc = vfsi_ctx.bindings.listdirv(vfsi_ctx.fs, dirs, walk.subdirs.nr,
 					0, 0, loose_entry_cb, &walk);
+	free(dirs);
+	dirs = NULL;
 	if (rc) {
 		error(_("vfsi: listdirv failed"));
 		goto fail;
@@ -394,6 +403,7 @@ out:
 	strvec_clear(&walk.subdirs);
 	strvec_clear(&walk.display_subdirs);
 	free(real_objects);
+	free(dirs);
 	return rc;
 }
 
