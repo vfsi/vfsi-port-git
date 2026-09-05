@@ -82,16 +82,23 @@ static int is_object_reachable(const struct object_id *oid,
 	return obj && (obj->flags & SEEN);
 }
 
+struct prune_data {
+	struct rev_info *revs;
+	struct odb_source *source;
+};
+
 static int prune_object(const struct object_id *oid, const char *fullpath,
 			void *data)
 {
-	struct rev_info *revs = data;
+	struct prune_data *prune_data = data;
+	struct rev_info *revs = prune_data->revs;
 	struct stat st;
 
 	if (is_object_reachable(oid, revs))
 		return 0;
 
-	if (!vfsi_fill_stat(fullpath, &st) && lstat(fullpath, &st)) {
+	if (!vfsi_fill_stat(prune_data->source, fullpath, &st) &&
+	    lstat(fullpath, &st)) {
 		/* report errors, but do not stop pruning */
 		error("Could not stat '%s'", fullpath);
 		return 0;
@@ -104,8 +111,10 @@ static int prune_object(const struct object_id *oid, const char *fullpath,
 		printf("%s %s\n", oid_to_hex(oid),
 		       (type > 0) ? type_name(type) : "unknown");
 	}
-	if (!show_only)
+	if (!show_only) {
 		unlink_or_warn(fullpath);
+		vfsi_source_invalidate(prune_data->source);
+	}
 	return 0;
 }
 
@@ -199,8 +208,15 @@ int cmd_prune(int argc,
 		revs.exclude_promisor_objects = 1;
 	}
 
-	for_each_loose_file_in_source(repo->objects->sources,
-				      prune_object, prune_cruft, prune_subdir, &revs);
+	{
+		struct prune_data prune_data = {
+			.revs = &revs,
+			.source = repo->objects->sources,
+		};
+		for_each_loose_file_in_source(repo->objects->sources,
+					      prune_object, prune_cruft,
+					      prune_subdir, &prune_data);
+	}
 
 	prune_packed_objects(show_only ? PRUNE_PACKED_DRY_RUN : 0);
 	remove_temporary_files(repo_get_object_directory(repo));

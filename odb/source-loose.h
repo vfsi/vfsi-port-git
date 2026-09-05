@@ -6,6 +6,7 @@
 struct odb_source_files;
 struct object_database;
 struct oidtree;
+struct vfsi_source_context;
 
 /*
  * An object database source that stores its objects in loose format, one
@@ -28,6 +29,9 @@ struct odb_source_loose {
 
 	/* Map between object IDs for loose objects. */
 	struct loose_object_map *map;
+
+	/* State owned by the optional vectorized filesystem integration. */
+	struct vfsi_source_context *vfsi;
 };
 
 struct odb_source_loose *odb_source_loose_new(struct object_database *odb,

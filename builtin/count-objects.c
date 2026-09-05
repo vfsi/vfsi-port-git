@@ -60,11 +60,12 @@ static void loose_garbage(const char *path)
 }
 
 static int count_loose(const struct object_id *oid, const char *path,
-		       void *data UNUSED)
+		       void *data)
 {
+	struct odb_source *source = data;
 	struct stat st;
 
-	if ((!vfsi_fill_stat(path, &st) && lstat(path, &st)) ||
+	if ((!vfsi_fill_stat(source, path, &st) && lstat(path, &st)) ||
 	    !S_ISREG(st.st_mode))
 		loose_garbage(path);
 	else {
@@ -121,7 +122,8 @@ int cmd_count_objects(int argc,
 	}
 
 	for_each_loose_file_in_source(the_repository->objects->sources,
-				      count_loose, count_cruft, NULL, NULL);
+				      count_loose, count_cruft, NULL,
+				      the_repository->objects->sources);
 
 	if (verbose) {
 		struct packed_git *p;

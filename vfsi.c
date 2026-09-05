@@ -3,8 +3,11 @@
 #include "gettext.h"
 #include "hex.h"
 #include "object-file.h"
+#include "odb/source-files.h"
+#include "odb/source-loose.h"
 #include "strbuf.h"
 #include "strvec.h"
+#include "thread-utils.h"
 #include "git-vfsi.h"
 #include <vfsi.h>
 
@@ -30,13 +33,11 @@ enum vfsi_loader_state {
 	VFSI_LOADER_UNAVAILABLE,
 };
 
-static struct vfsi_context {
+static struct {
 	struct vfsi_bindings bindings;
-	struct vfsi_fs *fs;
-	char *mountpoint;
-	int cleanup_registered;
 	enum vfsi_loader_state loader_state;
-} vfsi_ctx;
+	pthread_mutex_t mutex;
+} vfsi_runtime = { .mutex = PTHREAD_MUTEX_INITIALIZER };
 
 enum {
 	VFSI_NF4DIR = 2,
@@ -54,9 +55,16 @@ struct vfsi_object {
 	size_t data_len;
 };
 
-static struct vfsi_object *vfsi_objects;
-static size_t vfsi_objects_nr;
-static size_t vfsi_objects_cap;
+struct vfsi_source_context {
+	struct vfsi_fs *fs;
+	char *mountpoint;
+	struct vfsi_object *objects;
+	size_t objects_nr;
+	size_t objects_cap;
+	pthread_mutex_t mutex;
+	int traversal_active;
+	int invalidate_pending;
+};
 
 static int vfsi_prefetch_enabled(void)
 {
@@ -65,37 +73,94 @@ static int vfsi_prefetch_enabled(void)
 	return value && *value && strcmp(value, "0");
 }
 
-static void vfsi_clear_objects(void)
+static void vfsi_clear_objects(struct vfsi_source_context *ctx)
 {
 	size_t i;
 
-	for (i = 0; i < vfsi_objects_nr; i++) {
-		free(vfsi_objects[i].display_dir);
-		free(vfsi_objects[i].display_path);
-		free(vfsi_objects[i].name);
-		free(vfsi_objects[i].real_path);
-		free(vfsi_objects[i].data);
+	for (i = 0; i < ctx->objects_nr; i++) {
+		free(ctx->objects[i].display_dir);
+		free(ctx->objects[i].display_path);
+		free(ctx->objects[i].name);
+		free(ctx->objects[i].real_path);
+		free(ctx->objects[i].data);
 	}
-	vfsi_objects_nr = 0;
+	ctx->objects_nr = 0;
 }
 
-static void vfsi_cleanup(void)
+static struct odb_source_loose *vfsi_loose_source(struct odb_source *source)
 {
-	vfsi_clear_objects();
-	free(vfsi_objects);
-	vfsi_objects = NULL;
-	vfsi_objects_cap = 0;
-	if (vfsi_ctx.fs && vfsi_ctx.bindings.free)
-		vfsi_ctx.bindings.free(vfsi_ctx.fs);
-	vfsi_ctx.fs = NULL;
-	/*
-	 * Leave libvfsi_c (and its libntirpc worker pool) mapped until the
-	 * process exits. dlclose() here unloads the NFS runtime while its
-	 * background threads are still tearing down, which can crash inside
-	 * tirpc_free() during exit.
-	 */
-	free(vfsi_ctx.mountpoint);
-	vfsi_ctx.mountpoint = NULL;
+	if (!source)
+		return NULL;
+	if (source->type == ODB_SOURCE_FILES)
+		return odb_source_files_downcast(source)->loose;
+	if (source->type == ODB_SOURCE_LOOSE)
+		return odb_source_loose_downcast(source);
+	return NULL;
+}
+
+static struct vfsi_source_context *vfsi_source_context(struct odb_source *source,
+							int create)
+{
+	struct odb_source_loose *loose = vfsi_loose_source(source);
+	struct vfsi_source_context *ctx;
+
+	if (!loose)
+		return NULL;
+	pthread_mutex_lock(&vfsi_runtime.mutex);
+	ctx = loose->vfsi;
+	if (!ctx && create) {
+		CALLOC_ARRAY(ctx, 1);
+		if (init_recursive_mutex(&ctx->mutex))
+			die_errno(_("vfsi: cannot initialize source mutex"));
+		loose->vfsi = ctx;
+	}
+	pthread_mutex_unlock(&vfsi_runtime.mutex);
+	return ctx;
+}
+
+void vfsi_source_invalidate(struct odb_source *source)
+{
+	struct vfsi_source_context *ctx = vfsi_source_context(source, 0);
+
+	if (!ctx)
+		return;
+	pthread_mutex_lock(&ctx->mutex);
+	if (ctx->traversal_active)
+		ctx->invalidate_pending = 1;
+	else
+		vfsi_clear_objects(ctx);
+	pthread_mutex_unlock(&ctx->mutex);
+}
+
+void vfsi_source_close(struct odb_source *source)
+{
+	struct vfsi_source_context *ctx = vfsi_source_context(source, 0);
+
+	if (!ctx)
+		return;
+	pthread_mutex_lock(&ctx->mutex);
+	vfsi_clear_objects(ctx);
+	if (ctx->fs && vfsi_runtime.bindings.free)
+		vfsi_runtime.bindings.free(ctx->fs);
+	ctx->fs = NULL;
+	free(ctx->mountpoint);
+	ctx->mountpoint = NULL;
+	pthread_mutex_unlock(&ctx->mutex);
+}
+
+void vfsi_source_release(struct odb_source *source)
+{
+	struct odb_source_loose *loose = vfsi_loose_source(source);
+	struct vfsi_source_context *ctx;
+
+	if (!loose || !loose->vfsi)
+		return;
+	ctx = loose->vfsi;
+	vfsi_source_close(source);
+	free(ctx->objects);
+	pthread_mutex_destroy(&ctx->mutex);
+	free(ctx);
+	loose->vfsi = NULL;
 }
 
 static int load_symbol(void *handle, const char *name, void **out)
@@ -114,11 +179,17 @@ static int load_vfsi_bindings(const char *library)
 {
 	struct vfsi_bindings candidate = { 0 };
 	uint32_t version;
+	int result;
 
-	if (vfsi_ctx.loader_state == VFSI_LOADER_AVAILABLE)
-		return 1;
-	if (vfsi_ctx.loader_state == VFSI_LOADER_UNAVAILABLE)
-		return 0;
+	pthread_mutex_lock(&vfsi_runtime.mutex);
+	if (vfsi_runtime.loader_state == VFSI_LOADER_AVAILABLE) {
+		result = 1;
+		goto out;
+	}
+	if (vfsi_runtime.loader_state == VFSI_LOADER_UNAVAILABLE) {
+		result = 0;
+		goto out;
+	}
 
 	candidate.handle = dlopen(library, RTLD_NOW | RTLD_LOCAL);
 	if (!candidate.handle) {
@@ -146,19 +217,19 @@ static int load_vfsi_bindings(const char *library)
 	LOAD_VFSI("vfsi_free", candidate.free);
 #undef LOAD_VFSI
 
-	vfsi_ctx.bindings = candidate;
-	vfsi_ctx.loader_state = VFSI_LOADER_AVAILABLE;
-	if (!vfsi_ctx.cleanup_registered) {
-		atexit(vfsi_cleanup);
-		vfsi_ctx.cleanup_registered = 1;
-	}
-	return 1;
+	vfsi_runtime.bindings = candidate;
+	vfsi_runtime.loader_state = VFSI_LOADER_AVAILABLE;
+	result = 1;
+	goto out;
 
 unavailable:
 	if (candidate.handle)
 		dlclose(candidate.handle);
-	vfsi_ctx.loader_state = VFSI_LOADER_UNAVAILABLE;
-	return 0;
+	vfsi_runtime.loader_state = VFSI_LOADER_UNAVAILABLE;
+	result = 0;
+out:
+	pthread_mutex_unlock(&vfsi_runtime.mutex);
+	return result;
 }
 
 struct vfsi_mount {
@@ -240,9 +311,9 @@ static int vfsi_mount_for(const char *path, struct vfsi_mount *result)
 #endif
 }
 
-static int open_vfsi(const char *objects_path)
+static int open_vfsi(struct vfsi_source_context *ctx, const char *objects_path)
 {
-	struct vfsi_bindings *b = &vfsi_ctx.bindings;
+	struct vfsi_bindings *b = &vfsi_runtime.bindings;
 	const char *impl = getenv("VFSI_IMPL");
 	const char *library = getenv("VFSI_LIBRARY");
 	struct vfsi_mount mount = { 0 };
@@ -266,14 +337,13 @@ static int open_vfsi(const char *objects_path)
 		dummy_mount = getenv("VFSI_MOUNT");
 		if (!dummy_root || !dummy_mount)
 			return 0;
-		if (vfsi_ctx.fs) {
-			b->free(vfsi_ctx.fs);
-			vfsi_ctx.fs = NULL;
+		if (ctx->fs) {
+			b->free(ctx->fs);
+			ctx->fs = NULL;
 		}
-		free(vfsi_ctx.mountpoint);
-		vfsi_ctx.mountpoint = NULL;
-		vfsi_ctx.mountpoint = xstrdup(dummy_mount);
-		rc = b->dummy_open_mount(dummy_root, dummy_mount, &vfsi_ctx.fs);
+		free(ctx->mountpoint);
+		ctx->mountpoint = xstrdup(dummy_mount);
+		rc = b->dummy_open_mount(dummy_root, dummy_mount, &ctx->fs);
 	} else {
 		host_override = getenv("VFSI_HOST");
 		export_override = getenv("VFSI_EXPORT");
@@ -297,14 +367,14 @@ static int open_vfsi(const char *objects_path)
 			free(mount.mountpoint);
 			mount.mountpoint = xstrdup(mount_override);
 		}
-		if (vfsi_ctx.fs) {
-			b->free(vfsi_ctx.fs);
-			vfsi_ctx.fs = NULL;
+		if (ctx->fs) {
+			b->free(ctx->fs);
+			ctx->fs = NULL;
 		}
-		free(vfsi_ctx.mountpoint);
-		vfsi_ctx.mountpoint = xstrdup(mount.mountpoint);
+		free(ctx->mountpoint);
+		ctx->mountpoint = xstrdup(mount.mountpoint);
 		rc = b->nfs_open_mount_export(mount.host, mount.export_root,
-					      mount.mountpoint, &vfsi_ctx.fs);
+					      mount.mountpoint, &ctx->fs);
 		vfsi_mount_clear(&mount);
 	}
 	if (rc) {
@@ -315,6 +385,7 @@ static int open_vfsi(const char *objects_path)
 }
 
 struct vfsi_walk {
+	struct vfsi_source_context *ctx;
 	const struct git_hash_algo *algop;
 	each_loose_object_fn *obj_cb;
 	each_loose_cruft_fn *cruft_cb;
@@ -398,7 +469,8 @@ static const char *display_dir_for_real(struct vfsi_walk *walk,
 	return NULL;
 }
 
-static struct vfsi_object *vfsi_object_add(const char *display_dir,
+static struct vfsi_object *vfsi_object_add(struct vfsi_source_context *ctx,
+					   const char *display_dir,
 					   const char *display_path,
 					   const char *real_dir,
 					   const char *name,
@@ -406,8 +478,8 @@ static struct vfsi_object *vfsi_object_add(const char *display_dir,
 {
 	struct vfsi_object *obj;
 
-	ALLOC_GROW(vfsi_objects, vfsi_objects_nr + 1, vfsi_objects_cap);
-	obj = &vfsi_objects[vfsi_objects_nr++];
+	ALLOC_GROW(ctx->objects, ctx->objects_nr + 1, ctx->objects_cap);
+	obj = &ctx->objects[ctx->objects_nr++];
 	memset(obj, 0, sizeof(*obj));
 	obj->display_dir = xstrdup(display_dir);
 	obj->display_path = xstrdup(display_path);
@@ -430,19 +502,20 @@ static bool loose_entry_cb(const char *dir, const char *name,
 	if (!strcmp(name, ".") || !strcmp(name, ".."))
 		return true;
 	display_path = xstrfmt("%s/%s", display_dir, name);
-	vfsi_object_add(display_dir, display_path, dir, name, attrs);
+	vfsi_object_add(walk->ctx, display_dir, display_path, dir, name, attrs);
 	free(display_path);
 	return true;
 }
 
-static struct vfsi_object *vfsi_find_object(const char *path)
+static struct vfsi_object *vfsi_find_object(struct vfsi_source_context *ctx,
+					    const char *path)
 {
 	size_t i;
 
-	for (i = 0; i < vfsi_objects_nr; i++) {
-		if (!strcmp(vfsi_objects[i].display_path, path) ||
-		    !strcmp(vfsi_objects[i].real_path, path))
-			return &vfsi_objects[i];
+	for (i = 0; i < ctx->objects_nr; i++) {
+		if (!strcmp(ctx->objects[i].display_path, path) ||
+		    !strcmp(ctx->objects[i].real_path, path))
+			return &ctx->objects[i];
 	}
 	return NULL;
 }
@@ -451,9 +524,8 @@ static bool vfsi_store_read_paths_cb(const char *path,
 				     const unsigned char *data,
 				     size_t len, void *userdata)
 {
-	struct vfsi_object *obj = vfsi_find_object(path);
-
-	(void)userdata;
+	struct vfsi_source_context *ctx = userdata;
+	struct vfsi_object *obj = vfsi_find_object(ctx, path);
 	if (!obj)
 		return true;
 	free(obj->data);
@@ -463,7 +535,7 @@ static bool vfsi_store_read_paths_cb(const char *path,
 	return true;
 }
 
-static int vfsi_prefetch_object_data(void)
+static int vfsi_prefetch_object_data(struct vfsi_source_context *ctx)
 {
 	const char **paths;
 	size_t i;
@@ -471,18 +543,18 @@ static int vfsi_prefetch_object_data(void)
 	size_t chunk;
 	int rc = 0;
 
-	if (!vfsi_objects_nr)
+	if (!ctx->objects_nr)
 		return 0;
-	paths = xcalloc(vfsi_objects_nr, sizeof(*paths));
-	for (i = 0; i < vfsi_objects_nr; i++)
-		paths[next++] = vfsi_objects[i].real_path;
+	paths = xcalloc(ctx->objects_nr, sizeof(*paths));
+	for (i = 0; i < ctx->objects_nr; i++)
+		paths[next++] = ctx->objects[i].real_path;
 	for (chunk = 0; chunk < next; chunk += 4096) {
 		size_t count = next - chunk < 4096 ? next - chunk : 4096;
 
-		rc = vfsi_ctx.bindings.read_paths(vfsi_ctx.fs,
+		rc = vfsi_runtime.bindings.read_paths(ctx->fs,
 						  (const char *const *)&paths[chunk],
 						  count, vfsi_store_read_paths_cb,
-						  NULL);
+						  ctx);
 		if (rc)
 			break;
 	}
@@ -511,29 +583,47 @@ static void vfsi_attrs_to_stat(const struct vfsi_attrs *attrs, struct stat *st)
 	st->st_ctime = attrs->ctime_sec;
 }
 
-int vfsi_fill_stat(const char *path, struct stat *st)
+int vfsi_fill_stat(struct odb_source *source, const char *path, struct stat *st)
 {
-	struct vfsi_object *obj = vfsi_find_object(path);
+	struct vfsi_source_context *ctx = vfsi_source_context(source, 0);
+	struct vfsi_object *obj;
 
-	if (!obj)
+	if (!ctx)
 		return 0;
+	pthread_mutex_lock(&ctx->mutex);
+	obj = vfsi_find_object(ctx, path);
+	if (!obj) {
+		pthread_mutex_unlock(&ctx->mutex);
+		return 0;
+	}
 	vfsi_attrs_to_stat(&obj->attrs, st);
+	pthread_mutex_unlock(&ctx->mutex);
 	return 1;
 }
 
-int vfsi_read_loose_object(const char *path, void **buf, unsigned long *size)
+int vfsi_read_loose_object(struct odb_source *source, const char *path,
+			   void **buf, unsigned long *size)
 {
-	struct vfsi_object *obj = vfsi_find_object(path);
+	struct vfsi_source_context *ctx = vfsi_source_context(source, 0);
+	struct vfsi_object *obj;
 
-	if (!obj || !obj->data)
+	if (!ctx)
 		return 0;
+	pthread_mutex_lock(&ctx->mutex);
+	obj = vfsi_find_object(ctx, path);
+	if (!obj || !obj->data) {
+		pthread_mutex_unlock(&ctx->mutex);
+		return 0;
+	}
 	*buf = xmalloc(obj->data_len ? obj->data_len : 1);
 	memcpy(*buf, obj->data, obj->data_len);
 	*size = obj->data_len;
+	pthread_mutex_unlock(&ctx->mutex);
 	return 1;
 }
 
-static int vfsi_for_each_loose_file_locked(const char *objects_dir,
+static int vfsi_for_each_loose_file_locked(struct vfsi_source_context *ctx,
+					   const char *objects_dir,
 					   const struct git_hash_algo *algop,
 					   each_loose_object_fn obj_cb,
 					   each_loose_cruft_fn cruft_cb,
@@ -541,6 +631,7 @@ static int vfsi_for_each_loose_file_locked(const char *objects_dir,
 					   void *data, int *result)
 {
 	struct vfsi_walk walk = {
+		.ctx = ctx,
 		.algop = algop,
 		.obj_cb = obj_cb,
 		.cruft_cb = cruft_cb,
@@ -558,11 +649,11 @@ static int vfsi_for_each_loose_file_locked(const char *objects_dir,
 	real_objects = real_pathdup(objects_dir, 0);
 	if (!real_objects)
 		return 0;
-	vfsi_clear_objects();
+	vfsi_clear_objects(ctx);
 	walk.real_root = real_objects;
 	strvec_init(&walk.subdirs);
 	strvec_init(&walk.display_subdirs);
-	rc = open_vfsi(real_objects);
+	rc = open_vfsi(ctx, real_objects);
 	if (rc <= 0) {
 		strvec_clear(&walk.subdirs);
 		strvec_clear(&walk.display_subdirs);
@@ -570,7 +661,7 @@ static int vfsi_for_each_loose_file_locked(const char *objects_dir,
 		return rc;
 	}
 
-	rc = vfsi_ctx.bindings.listdir(vfsi_ctx.fs, real_objects,
+	rc = vfsi_runtime.bindings.listdir(ctx->fs, real_objects,
 				       collect_subdir_cb, &walk);
 	if (rc) {
 		error(_("vfsi: unable to list %s"), real_objects);
@@ -586,13 +677,13 @@ static int vfsi_for_each_loose_file_locked(const char *objects_dir,
 	 * (objects/00 … objects/ff), which fsck relies on when it learns
 	 * object types while scanning. */
 	qsort(dirs, walk.subdirs.nr, sizeof(*dirs), cmp_subdir_ptr);
-	rc = vfsi_ctx.bindings.listdirv(vfsi_ctx.fs, dirs, walk.subdirs.nr,
+	rc = vfsi_runtime.bindings.listdirv(ctx->fs, dirs, walk.subdirs.nr,
 					0, 0, loose_entry_cb, &walk);
 	if (rc) {
 		error(_("vfsi: listdirv failed"));
 		goto fail;
 	}
-	if (vfsi_prefetch_enabled() && vfsi_prefetch_object_data() < 0) {
+	if (vfsi_prefetch_enabled() && vfsi_prefetch_object_data(ctx) < 0) {
 		error(_("vfsi: unable to prefetch loose objects"));
 		goto fail;
 	}
@@ -605,8 +696,8 @@ static int vfsi_for_each_loose_file_locked(const char *objects_dir,
 		size_t j;
 		unsigned nr;
 
-		for (j = 0; j < vfsi_objects_nr; j++) {
-			struct vfsi_object *obj = &vfsi_objects[j];
+		for (j = 0; j < ctx->objects_nr; j++) {
+			struct vfsi_object *obj = &ctx->objects[j];
 
 			if (strcmp(obj->display_dir, dir))
 				continue;
@@ -638,16 +729,36 @@ out:
 	return rc;
 }
 
-int vfsi_for_each_loose_file(const char *objects_dir,
+int vfsi_for_each_loose_file(struct odb_source *source,
+			     const char *objects_dir,
 			     const struct git_hash_algo *algop,
 			     each_loose_object_fn obj_cb,
 			     each_loose_cruft_fn cruft_cb,
 			     each_loose_subdir_fn subdir_cb,
 			     void *data, int *result)
 {
+	struct vfsi_source_context *ctx;
+	int rc;
+
 	if (!result)
 		BUG("vfsi_for_each_loose_file requires a result pointer");
-	return vfsi_for_each_loose_file_locked(objects_dir, algop,
-					       obj_cb, cruft_cb,
-					       subdir_cb, data, result);
+	ctx = vfsi_source_context(source, 1);
+	if (!ctx)
+		return 0;
+	pthread_mutex_lock(&ctx->mutex);
+	if (ctx->traversal_active) {
+		pthread_mutex_unlock(&ctx->mutex);
+		return 0;
+	}
+	ctx->traversal_active = 1;
+	rc = vfsi_for_each_loose_file_locked(ctx, objects_dir, algop,
+					    obj_cb, cruft_cb,
+					    subdir_cb, data, result);
+	ctx->traversal_active = 0;
+	if (ctx->invalidate_pending) {
+		vfsi_clear_objects(ctx);
+		ctx->invalidate_pending = 0;
+	}
+	pthread_mutex_unlock(&ctx->mutex);
+	return rc;
 }

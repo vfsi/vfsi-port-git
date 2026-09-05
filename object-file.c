@@ -1118,7 +1118,7 @@ int for_each_loose_file_in_source(struct odb_source *source,
 	struct strbuf buf = STRBUF_INIT;
 	int r, handled, vfsi_result = 0;
 
-	handled = vfsi_for_each_loose_file(source->path,
+	handled = vfsi_for_each_loose_file(source, source->path,
 					   source->odb->repo->hash_algo,
 					   obj_cb, cruft_cb, subdir_cb,
 					   data, &vfsi_result);
@@ -1204,6 +1204,7 @@ int read_loose_object(struct repository *repo,
 		      void **contents,
 		      struct object_info *oi)
 {
+	struct odb_source *source;
 	int ret = -1;
 	int fd;
 	void *map = NULL;
@@ -1213,12 +1214,15 @@ int read_loose_object(struct repository *repo,
 	char hdr[MAX_HEADER_LEN];
 	size_t *size = oi->sizep;
 
-	if (!vfsi_read_loose_object(path, &map, &mapsize)) {
+	for (source = repo->objects->sources; source; source = source->next)
+		if (vfsi_read_loose_object(source, path, &map, &mapsize)) {
+			map_allocated = 1;
+			break;
+		}
+	if (!map) {
 		fd = git_open(path);
 		if (fd >= 0)
 			map = map_fd(fd, path, &mapsize);
-	} else {
-		map_allocated = 1;
 	}
 	if (!map) {
 		error_errno(_("unable to mmap %s"), path);

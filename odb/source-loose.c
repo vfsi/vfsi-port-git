@@ -98,7 +98,8 @@ static int read_object_info_from_path(struct odb_source_loose *loose,
 			goto out;
 		}
 
-		if (!vfsi_fill_stat(path, &st) && lstat(path, &st) < 0) {
+		if (!vfsi_fill_stat(&loose->base, path, &st) &&
+		    lstat(path, &st) < 0) {
 			if (errno == ENOENT) {
 				ret = ODB_READ_NOT_FOUND;
 				goto out;
@@ -119,7 +120,7 @@ static int read_object_info_from_path(struct odb_source_loose *loose,
 		goto out;
 	}
 
-	if (!vfsi_read_loose_object(path, &map, &mapsize)) {
+	if (!vfsi_read_loose_object(&loose->base, path, &map, &mapsize)) {
 		fd = git_open(path);
 		if (fd < 0) {
 			if (errno == ENOENT) {
@@ -148,7 +149,7 @@ static int read_object_info_from_path(struct odb_source_loose *loose,
 		map = xmmap(NULL, mapsize, PROT_READ, MAP_PRIVATE, fd, 0);
 		close(fd);
 	} else {
-		vfsi_fill_stat(path, &st);
+		vfsi_fill_stat(&loose->base, path, &st);
 		map_allocated = 1;
 	}
 	if (!map) {
@@ -600,8 +601,12 @@ static int odb_source_loose_freshen_object(struct odb_source *source,
 {
 	struct odb_source_loose *loose = odb_source_loose_downcast(source);
 	static struct strbuf path = STRBUF_INIT;
+	int ret;
 	odb_loose_path(loose, &path, oid);
-	return !!check_and_freshen_file(path.buf, 1, mtime);
+	ret = !!check_and_freshen_file(path.buf, 1, mtime);
+	if (ret)
+		vfsi_source_invalidate(source);
+	return ret;
 }
 
 /* Finalize a file on disk, and close it. */
@@ -856,9 +861,10 @@ static int odb_source_loose_write_object(struct odb_source *source,
 	if (write_loose_object(loose, oid, hdr, hdrlen, buf, len, mtime, flags))
 		return -1;
 
-	if (compat_oid)
-		return repo_add_loose_object_map(loose, oid, compat_oid);
+	if (compat_oid && repo_add_loose_object_map(loose, oid, compat_oid))
+		return -1;
 
+	vfsi_source_invalidate(source);
 	return 0;
 }
 
@@ -983,6 +989,8 @@ static int odb_source_loose_write_object_stream(struct odb_source *source,
 cleanup:
 	strbuf_release(&tmp_file);
 	strbuf_release(&filename);
+	if (!err)
+		vfsi_source_invalidate(source);
 	return err;
 }
 
@@ -1018,13 +1026,15 @@ static void odb_source_loose_prepare(struct odb_source *source,
 				     enum odb_prepare_flags flags)
 {
 	struct odb_source_loose *loose = odb_source_loose_downcast(source);
-	if (flags & ODB_PREPARE_FLUSH_CACHES)
+	if (flags & ODB_PREPARE_FLUSH_CACHES) {
 		odb_source_loose_clear_cache(loose);
+		vfsi_source_invalidate(source);
+	}
 }
 
-static void odb_source_loose_close(struct odb_source *source UNUSED)
+static void odb_source_loose_close(struct odb_source *source)
 {
-	/* Nothing to do. */
+	vfsi_source_close(source);
 }
 
 static void odb_source_loose_reparent(const char *old_cwd,
@@ -1032,8 +1042,10 @@ static void odb_source_loose_reparent(const char *old_cwd,
 				      void *cb_data)
 {
 	struct odb_source_loose *loose = cb_data;
-	char *path = reparent_relative_path(old_cwd, new_cwd,
-					    loose->base.path);
+	char *path;
+
+	vfsi_source_close(&loose->base);
+	path = reparent_relative_path(old_cwd, new_cwd, loose->base.path);
 	free(loose->base.path);
 	loose->base.path = path;
 }
@@ -1041,6 +1053,7 @@ static void odb_source_loose_reparent(const char *old_cwd,
 static void odb_source_loose_free(struct odb_source *source)
 {
 	struct odb_source_loose *loose = odb_source_loose_downcast(source);
+	vfsi_source_release(source);
 	odb_source_loose_clear_cache(loose);
 	loose_object_map_clear(&loose->map);
 	chdir_notify_unregister(odb_source_loose_reparent, loose);
