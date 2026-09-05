@@ -66,9 +66,12 @@ static void vfsi_cleanup(void)
 	if (vfsi_ctx.fs && vfsi_ctx.bindings.free)
 		vfsi_ctx.bindings.free(vfsi_ctx.fs);
 	vfsi_ctx.fs = NULL;
-	if (vfsi_ctx.bindings.handle)
-		dlclose(vfsi_ctx.bindings.handle);
-	vfsi_ctx.bindings.handle = NULL;
+	/*
+	 * Leave libvfsi_c (and its libntirpc worker pool) mapped until the
+	 * process exits. dlclose() here unloads the NFS runtime while its
+	 * background threads are still tearing down, which can crash inside
+	 * tirpc_free() during exit.
+	 */
 	free(vfsi_ctx.mountpoint);
 	vfsi_ctx.mountpoint = NULL;
 }
