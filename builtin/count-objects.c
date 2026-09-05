@@ -14,6 +14,7 @@
 #include "quote.h"
 #include "packfile.h"
 #include "object-file.h"
+#include "vfsi.h"
 
 static unsigned long garbage;
 static off_t size_garbage;
@@ -63,7 +64,8 @@ static int count_loose(const struct object_id *oid, const char *path,
 {
 	struct stat st;
 
-	if (lstat(path, &st) || !S_ISREG(st.st_mode))
+	if ((!vfsi_fill_stat(path, &st) && lstat(path, &st)) ||
+	    !S_ISREG(st.st_mode))
 		loose_garbage(path);
 	else {
 		loose_size += on_disk_bytes(st);

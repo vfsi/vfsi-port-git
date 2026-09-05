@@ -8,7 +8,6 @@
 #include "vfsi.h"
 
 #include <dlfcn.h>
-#include <pthread.h>
 
 /* Minimal ABI mirrors of vfsi-c/include/vfsi.h. */
 struct vfsi_fs;
@@ -37,6 +36,10 @@ typedef int (*vfsi_listdirv_cb)(const char *dir,
 				const char *name,
 				const struct vfsi_attrs *attrs,
 				void *userdata);
+typedef int (*vfsi_read_paths_cb)(const char *path,
+				  const unsigned char *data,
+				  size_t len,
+				  void *userdata);
 
 struct vfsi_bindings {
 	void *handle;
@@ -45,6 +48,8 @@ struct vfsi_bindings {
 	int (*listdir)(struct vfsi_fs *, const char *, vfsi_listdir_cb, void *);
 	int (*listdirv)(struct vfsi_fs *, const char *const *, size_t,
 			size_t, int, vfsi_listdirv_cb, void *);
+	int (*read_paths)(struct vfsi_fs *, const char *const *, size_t,
+			  vfsi_read_paths_cb, void *);
 	void (*free)(struct vfsi_fs *);
 };
 
@@ -55,14 +60,53 @@ static struct vfsi_context {
 	int cleanup_registered;
 } vfsi_ctx;
 
-static pthread_mutex_t vfsi_lock = PTHREAD_MUTEX_INITIALIZER;
-
 enum {
-	VFSI_NF4DIR = 2
+	VFSI_NF4DIR = 2,
+	VFSI_NF4REG = 1,
+	VFSI_NF4LNK = 5
 };
+
+struct vfsi_object {
+	char *display_dir;
+	char *display_path;
+	char *name;
+	char *real_path;
+	struct vfsi_attrs attrs;
+	unsigned char *data;
+	size_t data_len;
+};
+
+static struct vfsi_object *vfsi_objects;
+static size_t vfsi_objects_nr;
+static size_t vfsi_objects_cap;
+
+static int vfsi_prefetch_enabled(void)
+{
+	const char *value = getenv("VFSI_PREFETCH_OBJECTS");
+
+	return value && *value && strcmp(value, "0");
+}
+
+static void vfsi_clear_objects(void)
+{
+	size_t i;
+
+	for (i = 0; i < vfsi_objects_nr; i++) {
+		free(vfsi_objects[i].display_dir);
+		free(vfsi_objects[i].display_path);
+		free(vfsi_objects[i].name);
+		free(vfsi_objects[i].real_path);
+		free(vfsi_objects[i].data);
+	}
+	vfsi_objects_nr = 0;
+}
 
 static void vfsi_cleanup(void)
 {
+	vfsi_clear_objects();
+	free(vfsi_objects);
+	vfsi_objects = NULL;
+	vfsi_objects_cap = 0;
 	if (vfsi_ctx.fs && vfsi_ctx.bindings.free)
 		vfsi_ctx.bindings.free(vfsi_ctx.fs);
 	vfsi_ctx.fs = NULL;
@@ -172,9 +216,10 @@ static int open_vfsi(const char *objects_path)
 } while (0)
 		LOAD_VFSI("vfsi_dummy_open_mount", b->dummy_open_mount);
 		LOAD_VFSI("vfsi_nfs_open_mount", b->nfs_open_mount);
-		LOAD_VFSI("vfsi_listdir", b->listdir);
-		LOAD_VFSI("vfsi_listdirv", b->listdirv);
-		LOAD_VFSI("vfsi_free", b->free);
+	LOAD_VFSI("vfsi_listdir", b->listdir);
+	LOAD_VFSI("vfsi_listdirv", b->listdirv);
+	LOAD_VFSI("vfsi_read_paths", b->read_paths);
+	LOAD_VFSI("vfsi_free", b->free);
 #undef LOAD_VFSI
 		if (!vfsi_ctx.cleanup_registered) {
 			atexit(vfsi_cleanup);
@@ -309,18 +354,159 @@ static const char *display_dir_for_real(struct vfsi_walk *walk,
 	return NULL;
 }
 
+static struct vfsi_object *vfsi_object_add(const char *display_dir,
+					   const char *display_path,
+					   const char *real_dir,
+					   const char *name,
+					   const struct vfsi_attrs *attrs)
+{
+	struct vfsi_object *obj;
+
+	ALLOC_GROW(vfsi_objects, vfsi_objects_nr + 1, vfsi_objects_cap);
+	obj = &vfsi_objects[vfsi_objects_nr++];
+	memset(obj, 0, sizeof(*obj));
+	obj->display_dir = xstrdup(display_dir);
+	obj->display_path = xstrdup(display_path);
+	obj->name = xstrdup(name);
+	obj->real_path = xstrfmt("%s/%s", real_dir, name);
+	obj->attrs = *attrs;
+	return obj;
+}
+
 static int loose_entry_cb(const char *dir, const char *name,
-			  const struct vfsi_attrs *attrs UNUSED,
+			  const struct vfsi_attrs *attrs,
 			  void *userdata)
 {
 	struct vfsi_walk *walk = userdata;
 	const char *display_dir = display_dir_for_real(walk, dir);
-	int rc;
+	char *display_path;
 
 	if (!display_dir)
 		return 1;
-	rc = process_loose_entry(walk, display_dir, name);
-	return rc == 0;
+	if (!strcmp(name, ".") || !strcmp(name, ".."))
+		return 1;
+	display_path = xstrfmt("%s/%s", display_dir, name);
+	vfsi_object_add(display_dir, display_path, dir, name, attrs);
+	free(display_path);
+	return 1;
+}
+
+static struct vfsi_object *vfsi_find_object(const char *path)
+{
+	size_t i;
+
+	for (i = 0; i < vfsi_objects_nr; i++) {
+		if (!strcmp(vfsi_objects[i].display_path, path) ||
+		    !strcmp(vfsi_objects[i].real_path, path))
+			return &vfsi_objects[i];
+	}
+	return NULL;
+}
+
+static int vfsi_store_read_paths_cb(const char *path, const unsigned char *data,
+				    size_t len, void *userdata)
+{
+	struct vfsi_object *obj = vfsi_find_object(path);
+
+	(void)userdata;
+	if (!obj)
+		return 1;
+	free(obj->data);
+	obj->data = xmalloc(len ? len : 1);
+	memcpy(obj->data, data, len);
+	obj->data_len = len;
+	return 1;
+}
+
+static int vfsi_prefetch_object_data(void)
+{
+	const char **paths;
+	size_t i;
+	size_t next = 0;
+	size_t chunk;
+	int rc = 0;
+
+	if (!vfsi_objects_nr)
+		return 0;
+	paths = xcalloc(vfsi_objects_nr, sizeof(*paths));
+	for (i = 0; i < vfsi_objects_nr; i++)
+		paths[next++] = vfsi_objects[i].real_path;
+	for (chunk = 0; chunk < next; chunk += 4096) {
+		size_t count = next - chunk < 4096 ? next - chunk : 4096;
+
+		rc = vfsi_ctx.bindings.read_paths(vfsi_ctx.fs,
+						  (const char *const *)&paths[chunk],
+						  count, vfsi_store_read_paths_cb,
+						  NULL);
+		if (rc)
+			break;
+	}
+	free(paths);
+	return rc;
+}
+
+static int object_cmp(const void *a, const void *b)
+{
+	const struct vfsi_object *oa = a;
+	const struct vfsi_object *ob = b;
+	int cmp;
+
+	cmp = strcmp(oa->display_dir, ob->display_dir);
+	if (cmp)
+		return cmp;
+	return strcmp(oa->name, ob->name);
+}
+
+static void vfsi_sort_objects(void)
+{
+	qsort(vfsi_objects, vfsi_objects_nr, sizeof(*vfsi_objects),
+	      object_cmp);
+}
+
+static void vfsi_attrs_to_stat(const struct vfsi_attrs *attrs, struct stat *st)
+{
+	memset(st, 0, sizeof(*st));
+	st->st_ino = attrs->fileid;
+	st->st_mode = attrs->mode & 07777;
+	if (attrs->ftype == VFSI_NF4DIR)
+		st->st_mode |= S_IFDIR;
+	else if (attrs->ftype == VFSI_NF4LNK)
+		st->st_mode |= S_IFLNK;
+	else
+		st->st_mode |= S_IFREG;
+	st->st_nlink = attrs->nlink;
+	st->st_uid = attrs->uid;
+	st->st_gid = attrs->gid;
+	st->st_size = attrs->size;
+	st->st_blocks = attrs->blocks;
+	st->st_atim.tv_sec = attrs->atime_sec;
+	st->st_atim.tv_nsec = attrs->atime_nsec;
+	st->st_mtim.tv_sec = attrs->mtime_sec;
+	st->st_mtim.tv_nsec = attrs->mtime_nsec;
+	st->st_ctim.tv_sec = attrs->ctime_sec;
+	st->st_ctim.tv_nsec = attrs->ctime_nsec;
+}
+
+int vfsi_fill_stat(const char *path, struct stat *st)
+{
+	struct vfsi_object *obj = vfsi_find_object(path);
+
+	if (!obj)
+		return 0;
+	vfsi_attrs_to_stat(&obj->attrs, st);
+	return 1;
+}
+
+int vfsi_read_loose_object(const char *path, void **buf, unsigned long *size)
+{
+	struct vfsi_object *obj = vfsi_find_object(path);
+
+	if (!obj || !obj->data)
+		return 0;
+	*buf = xmalloc(obj->data_len ? obj->data_len : 1);
+	memcpy(*buf, obj->data, obj->data_len);
+	*size = obj->data_len;
+	return 1;
 }
 
 static int vfsi_for_each_loose_file_locked(const char *objects_dir,
@@ -346,6 +532,7 @@ static int vfsi_for_each_loose_file_locked(const char *objects_dir,
 	real_objects = real_pathdup(objects_dir, 0);
 	if (!real_objects)
 		return 0;
+	vfsi_clear_objects();
 	walk.real_root = real_objects;
 	strvec_init(&walk.subdirs);
 	strvec_init(&walk.display_subdirs);
@@ -380,6 +567,21 @@ static int vfsi_for_each_loose_file_locked(const char *objects_dir,
 	if (rc) {
 		error(_("vfsi: listdirv failed"));
 		goto fail;
+	}
+	if (vfsi_prefetch_enabled() && vfsi_prefetch_object_data() < 0) {
+		error(_("vfsi: unable to prefetch loose objects"));
+		goto fail;
+	}
+	vfsi_sort_objects();
+	for (i = 0; i < vfsi_objects_nr; i++) {
+		struct vfsi_object *obj = &vfsi_objects[i];
+		int obj_rc;
+
+		if (walk.stop)
+			break;
+		obj_rc = process_loose_entry(&walk, obj->display_dir, obj->name);
+		if (obj_rc && !walk.stop)
+			break;
 	}
 	if (walk.stop)
 		goto fail;
@@ -417,12 +619,7 @@ int vfsi_for_each_loose_file(const char *objects_dir,
 			     each_loose_subdir_fn subdir_cb,
 			     void *data)
 {
-	int rc;
-
-	pthread_mutex_lock(&vfsi_lock);
-	rc = vfsi_for_each_loose_file_locked(objects_dir, algop,
-					     obj_cb, cruft_cb,
-					     subdir_cb, data);
-	pthread_mutex_unlock(&vfsi_lock);
-	return rc;
+	return vfsi_for_each_loose_file_locked(objects_dir, algop,
+					       obj_cb, cruft_cb,
+					       subdir_cb, data);
 }

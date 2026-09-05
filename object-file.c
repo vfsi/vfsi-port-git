@@ -1210,13 +1210,18 @@ int read_loose_object(struct repository *repo,
 	int fd;
 	void *map = NULL;
 	unsigned long mapsize;
+	int map_allocated = 0;
 	git_zstream stream;
 	char hdr[MAX_HEADER_LEN];
 	size_t *size = oi->sizep;
 
-	fd = git_open(path);
-	if (fd >= 0)
-		map = map_fd(fd, path, &mapsize);
+	if (!vfsi_read_loose_object(path, &map, &mapsize)) {
+		fd = git_open(path);
+		if (fd >= 0)
+			map = map_fd(fd, path, &mapsize);
+	} else {
+		map_allocated = 1;
+	}
 	if (!map) {
 		error_errno(_("unable to mmap %s"), path);
 		goto out;
@@ -1261,7 +1266,9 @@ int read_loose_object(struct repository *repo,
 out_inflate:
 	git_inflate_end(&stream);
 out:
-	if (map)
+	if (map && map_allocated)
+		free(map);
+	else if (map)
 		munmap(map, mapsize);
 	return ret;
 }

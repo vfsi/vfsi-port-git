@@ -15,6 +15,7 @@
 #include "repository.h"
 #include "strbuf.h"
 #include "tempfile.h"
+#include "vfsi.h"
 #include "write-or-die.h"
 
 static int append_loose_object(const struct object_id *oid,
@@ -79,6 +80,7 @@ static int read_object_info_from_path(struct odb_source_loose *loose,
 	size_t size_scratch;
 	enum object_type type_scratch;
 	struct stat st;
+	int map_allocated = 0;
 
 	/*
 	 * If we don't care about type or size, then we don't
@@ -96,7 +98,7 @@ static int read_object_info_from_path(struct odb_source_loose *loose,
 			goto out;
 		}
 
-		if (lstat(path, &st) < 0) {
+		if (!vfsi_fill_stat(path, &st) && lstat(path, &st) < 0) {
 			if (errno == ENOENT) {
 				ret = ODB_READ_NOT_FOUND;
 				goto out;
@@ -117,32 +119,38 @@ static int read_object_info_from_path(struct odb_source_loose *loose,
 		goto out;
 	}
 
-	fd = git_open(path);
-	if (fd < 0) {
-		if (errno == ENOENT) {
-			ret = ODB_READ_NOT_FOUND;
+	if (!vfsi_read_loose_object(path, &map, &mapsize)) {
+		fd = git_open(path);
+		if (fd < 0) {
+			if (errno == ENOENT) {
+				ret = ODB_READ_NOT_FOUND;
+				goto out;
+			}
+
+			ret = error_errno(_("unable to open loose object %s"),
+					  oid_to_hex(oid));
 			goto out;
 		}
 
-		ret = error_errno(_("unable to open loose object %s"), oid_to_hex(oid));
-		goto out;
-	}
+		if (fstat(fd, &st)) {
+			close(fd);
+			ret = -1;
+			goto out;
+		}
 
-	if (fstat(fd, &st)) {
+		mapsize = xsize_t(st.st_size);
+		if (!mapsize) {
+			close(fd);
+			ret = error(_("object file %s is empty"), path);
+			goto out;
+		}
+
+		map = xmmap(NULL, mapsize, PROT_READ, MAP_PRIVATE, fd, 0);
 		close(fd);
-		ret = -1;
-		goto out;
+	} else {
+		vfsi_fill_stat(path, &st);
+		map_allocated = 1;
 	}
-
-	mapsize = xsize_t(st.st_size);
-	if (!mapsize) {
-		close(fd);
-		ret = error(_("object file %s is empty"), path);
-		goto out;
-	}
-
-	map = xmmap(NULL, mapsize, PROT_READ, MAP_PRIVATE, fd, 0);
-	close(fd);
 	if (!map) {
 		ret = -1;
 		goto out;
@@ -197,7 +205,9 @@ out:
 			    oid_to_hex(oid), path);
 	if (stream_to_end)
 		git_inflate_end(stream_to_end);
-	if (map)
+	if (map && map_allocated)
+		free(map);
+	else if (map)
 		munmap(map, mapsize);
 	if (oi) {
 		if (oi->sizep == &size_scratch)
