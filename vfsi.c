@@ -6,6 +6,7 @@
 #include "odb/source-files.h"
 #include "odb/source-loose.h"
 #include "strbuf.h"
+#include "strmap.h"
 #include "strvec.h"
 #include "thread-utils.h"
 #include "git-vfsi.h"
@@ -61,9 +62,9 @@ struct vfsi_source_context {
 	struct vfsi_object *objects;
 	size_t objects_nr;
 	size_t objects_cap;
+	struct strmap objects_by_path;
 	pthread_mutex_t mutex;
 	int traversal_active;
-	int invalidate_pending;
 };
 
 static int vfsi_prefetch_enabled(void)
@@ -77,6 +78,7 @@ static void vfsi_clear_objects(struct vfsi_source_context *ctx)
 {
 	size_t i;
 
+	strmap_clear(&ctx->objects_by_path, 0);
 	for (i = 0; i < ctx->objects_nr; i++) {
 		free(ctx->objects[i].display_dir);
 		free(ctx->objects[i].display_path);
@@ -110,6 +112,7 @@ static struct vfsi_source_context *vfsi_source_context(struct odb_source *source
 	ctx = loose->vfsi;
 	if (!ctx && create) {
 		CALLOC_ARRAY(ctx, 1);
+		strmap_init(&ctx->objects_by_path);
 		if (init_recursive_mutex(&ctx->mutex))
 			die_errno(_("vfsi: cannot initialize source mutex"));
 		loose->vfsi = ctx;
@@ -125,9 +128,8 @@ void vfsi_source_invalidate(struct odb_source *source)
 	if (!ctx)
 		return;
 	pthread_mutex_lock(&ctx->mutex);
-	if (ctx->traversal_active)
-		ctx->invalidate_pending = 1;
-	else
+	/* Callback replay owns a stable snapshot and clears it before returning. */
+	if (!ctx->traversal_active)
 		vfsi_clear_objects(ctx);
 	pthread_mutex_unlock(&ctx->mutex);
 }
@@ -477,6 +479,8 @@ static struct vfsi_object *vfsi_object_add(struct vfsi_source_context *ctx,
 					   const struct vfsi_attrs *attrs)
 {
 	struct vfsi_object *obj;
+	size_t index = ctx->objects_nr;
+	void *index_value;
 
 	ALLOC_GROW(ctx->objects, ctx->objects_nr + 1, ctx->objects_cap);
 	obj = &ctx->objects[ctx->objects_nr++];
@@ -486,6 +490,9 @@ static struct vfsi_object *vfsi_object_add(struct vfsi_source_context *ctx,
 	obj->name = xstrdup(name);
 	obj->real_path = xstrfmt("%s/%s", real_dir, name);
 	obj->attrs = *attrs;
+	index_value = (void *)(uintptr_t)(index + 1);
+	strmap_put(&ctx->objects_by_path, obj->display_path, index_value);
+	strmap_put(&ctx->objects_by_path, obj->real_path, index_value);
 	return obj;
 }
 
@@ -510,14 +517,15 @@ static bool loose_entry_cb(const char *dir, const char *name,
 static struct vfsi_object *vfsi_find_object(struct vfsi_source_context *ctx,
 					    const char *path)
 {
-	size_t i;
+	void *index_value = strmap_get(&ctx->objects_by_path, path);
+	size_t index;
 
-	for (i = 0; i < ctx->objects_nr; i++) {
-		if (!strcmp(ctx->objects[i].display_path, path) ||
-		    !strcmp(ctx->objects[i].real_path, path))
-			return &ctx->objects[i];
-	}
-	return NULL;
+	if (!index_value)
+		return NULL;
+	index = (uintptr_t)index_value - 1;
+	if (index >= ctx->objects_nr)
+		BUG("vfsi path index is out of bounds");
+	return &ctx->objects[index];
 }
 
 static bool vfsi_store_read_paths_cb(const char *path,
@@ -755,10 +763,8 @@ int vfsi_for_each_loose_file(struct odb_source *source,
 					    obj_cb, cruft_cb,
 					    subdir_cb, data, result);
 	ctx->traversal_active = 0;
-	if (ctx->invalidate_pending) {
-		vfsi_clear_objects(ctx);
-		ctx->invalidate_pending = 0;
-	}
+	/* Cached entries exist only to serve singular calls made by callbacks. */
+	vfsi_clear_objects(ctx);
 	pthread_mutex_unlock(&ctx->mutex);
 	return rc;
 }
