@@ -464,8 +464,8 @@ include shared.mak
 #
 # Define USE_VFSI to enable the experimental vectorized filesystem integration.
 # Set VFSI_CFLAGS to the compiler flags needed to find vfsi-c's public vfsi.h
-# (for example, -I/path/to/vnfs/vfsi-c/include). Set VFSI_LIBS when the local
-# platform needs an additional library for dlopen()/dlsym() (usually -ldl).
+# (see Documentation/vfsi.adoc). Set VFSI_LIBS when the local platform needs
+# an additional library for dlopen()/dlsym() (usually -ldl).
 # Without USE_VFSI, portable inline stubs retain Git's normal filesystem path.
 #
 # === Optional library: libcurl ===

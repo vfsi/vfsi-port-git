@@ -12,6 +12,10 @@
 #include "git-vfsi.h"
 #include <vfsi.h>
 
+#if VFSI_ABI_VERSION != 3
+#error "Git VFSI support requires VFSI C ABI v3"
+#endif
+
 #include <dlfcn.h>
 
 struct vfsi_bindings {
@@ -399,6 +403,12 @@ struct vfsi_walk {
 	const char *real_root;
 };
 
+static int vfsi_attrs_valid(const struct vfsi_attrs *attrs)
+{
+	return attrs && attrs->abi_version == VFSI_ABI_VERSION &&
+		attrs->struct_size >= sizeof(*attrs);
+}
+
 static int is_hexpair(const char *s)
 {
 	return isxdigit((unsigned char)s[0]) &&
@@ -418,6 +428,8 @@ static bool collect_subdir_cb(const char *name, const struct vfsi_attrs *attrs,
 {
 	struct vfsi_walk *walk = userdata;
 
+	if (!name || !vfsi_attrs_valid(attrs))
+		return false;
 	if (attrs->ftype != VFSI_NF4DIR || !is_hexpair(name))
 		return true;
 	strvec_pushf(&walk->subdirs, "%s/%s", walk->real_root, name);
@@ -504,6 +516,8 @@ static bool loose_entry_cb(const char *dir, const char *name,
 	const char *display_dir = display_dir_for_real(walk, dir);
 	char *display_path;
 
+	if (!dir || !name || !vfsi_attrs_valid(attrs))
+		return false;
 	if (!display_dir)
 		return true;
 	if (!strcmp(name, ".") || !strcmp(name, ".."))

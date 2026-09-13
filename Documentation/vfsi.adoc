@@ -1,0 +1,24 @@
+VFSI integration
+================
+
+This port targets VNFS 0.0.11 through the public `vfsi-c` 0.3.0 package and
+VFSI C ABI v3. Fetch and build that release set from crates.io with:
+
+------------
+contrib/vfsi/build-vfsi-c
+make USE_VFSI=YesPlease \
+    VFSI_CFLAGS="-I$PWD/build-vfsi-c/vfsi-c-0.3.0-vnfs-0.0.11/source/include" \
+    NO_CURL=YesPlease NO_GETTEXT=YesPlease NO_TCLTK=YesPlease git
+------------
+
+The helper verifies the published `vfsi-c` archive checksum, selects the
+public VNFS 0.0.11 crate, rejects Git-sourced Cargo dependencies, and builds
+the shared library at:
+
+------------
+$PWD/build-vfsi-c/vfsi-c-0.3.0-vnfs-0.0.11/target/release/libvfsi_c.so
+------------
+
+At runtime, set `VFSI_IMPL` to `nfs` or `dummy` and point `VFSI_LIBRARY` at
+that library. The integration is opt-in; a build without `USE_VFSI` retains
+Git's ordinary filesystem path.
