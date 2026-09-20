@@ -17,7 +17,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    name: VNFS 0.0.11 / VFSI C ABI v3
+    name: VNFS 0.0.13 / VFSI C ABI v3
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -31,7 +31,7 @@ jobs:
       - name: Build Git with VFSI
         run: |
           make -j2 USE_VFSI=YesPlease \
-            VFSI_CFLAGS="-I$PWD/build-vfsi-c/vfsi-c-0.3.0-vnfs-0.0.11/source/include" \
+            VFSI_CFLAGS="-I$PWD/build-vfsi-c/vfsi-c-0.3.1-vnfs-0.0.13/source/include" \
             NO_CURL=YesPlease NO_GETTEXT=YesPlease NO_TCLTK=YesPlease git
       - name: Smoke test the public VFSI library
         run: |
@@ -44,7 +44,7 @@ jobs:
           git -C "$fixture" add input
           git -C "$fixture" commit --quiet -m smoke
           VFSI_IMPL=dummy \
-          VFSI_LIBRARY="$PWD/build-vfsi-c/vfsi-c-0.3.0-vnfs-0.0.11/target/release/libvfsi_c.so" \
+          VFSI_LIBRARY="$PWD/build-vfsi-c/vfsi-c-0.3.1-vnfs-0.0.13/target/release/libvfsi_c.so" \
           VFSI_ROOT="$fixture" \
           VFSI_MOUNT="$fixture" \
             ./git -C "$fixture" count-objects -v >/dev/null
