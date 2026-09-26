@@ -867,12 +867,6 @@ Fixes since v2.55
    Additionally, an obsolete variable used for retired Azure Pipelines
    environments has been removed.
 
- * Teach 'am', 'revert', and 'rebase' that running 'commit --amend' or a
-   partial 'commit <paths>' makes no sense during operations that stop
-   and return control to the user to resolve conflicts left in the
-   working tree, just like 'cherry-pick' and 'merge' do.
-   (merge cc499d40e5 en/no-amend-during-conflicts later to maint).
-
  * The error path in 'git submodule--helper' has been updated to plug a
    memory leak when a repository handle could not be obtained,
    leveraging an updated idempotent repo_clear().
@@ -888,7 +882,8 @@ Fixes since v2.55
    (merge ec602484bd kh/doc-datamodel later to maint).
 
  * Running "git history" in a corrupt repository can (unsurprisingly)
-   segfault when a necessary tree object is not found.
+   segfault when a necessary tree object is not found, which has been
+   made to die more gracefully.
    (merge 76621488e8 jc/history-missing-tree-errorfix later to maint).
 
  * The development helper script to lint gitlink references in the
