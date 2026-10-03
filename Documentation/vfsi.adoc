@@ -1,29 +1,29 @@
 VFSI integration
 ================
 
-This port targets VNFS 0.0.13 through the public `vfsi-c` 0.3.0 package and
+This port targets VNFS 0.0.16 through the public `vfsi-c` 0.3.2 package and
 VFSI C ABI v3. Fetch and build that release set from crates.io with:
 
 ------------
 contrib/vfsi/build-vfsi-c
 make USE_VFSI=YesPlease \
-    VFSI_CFLAGS="-I$PWD/build-vfsi-c/vfsi-c-0.3.1-vnfs-0.0.13/source/include" \
+    VFSI_CFLAGS="-I$PWD/build-vfsi-c/vfsi-c-0.3.2-vnfs-0.0.16/source/include" \
     NO_CURL=YesPlease NO_GETTEXT=YesPlease NO_TCLTK=YesPlease git
 ------------
 
 The helper verifies the published `vfsi-c` archive checksum, selects the
-public VNFS 0.0.13 crate, rejects Git-sourced Cargo dependencies, and builds
+public VNFS 0.0.16 crate, rejects Git-sourced Cargo dependencies, and builds
 the shared library at:
 
 ------------
-$PWD/build-vfsi-c/vfsi-c-0.3.1-vnfs-0.0.13/target/release/libvfsi_c.so
+$PWD/build-vfsi-c/vfsi-c-0.3.2-vnfs-0.0.16/target/release/libvfsi_c.so
 ------------
 
 At runtime, set `VFSI_IMPL` to `nfs` or `dummy` and point `VFSI_LIBRARY` at
 that library. The integration is opt-in; a build without `USE_VFSI` retains
 Git's ordinary filesystem path.
 
-The development adapter also exposes mount discovery. With `VFSI_IMPL=nfs`
+The published adapter also exposes mount discovery. With `VFSI_IMPL=nfs`
 and no explicit host/export/mount overrides, the port inherits the mount's
 version, port, and supported authentication rather than guessing AUTH_SYS.
 An older adapter without discovery keeps Git's ordinary filesystem path.
