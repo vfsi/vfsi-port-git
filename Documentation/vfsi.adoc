@@ -22,3 +22,24 @@ $PWD/build-vfsi-c/vfsi-c-0.3.1-vnfs-0.0.13/target/release/libvfsi_c.so
 At runtime, set `VFSI_IMPL` to `nfs` or `dummy` and point `VFSI_LIBRARY` at
 that library. The integration is opt-in; a build without `USE_VFSI` retains
 Git's ordinary filesystem path.
+
+The development adapter also exposes mount discovery. With `VFSI_IMPL=nfs`
+and no explicit host/export/mount overrides, the port inherits the mount's
+version, port, and supported authentication rather than guessing AUTH_SYS.
+An older adapter without discovery keeps Git's ordinary filesystem path.
+Direct access does not share the kernel client's caches.
+
+Loose-object prefetch is optional (`VFSI_PREFETCH_OBJECTS=1`).
+`VFSI_PREFETCH_BYTES` bounds retained object payloads (default 64 MiB;
+zero disables payload prefetch). Only regular files with valid loose-object
+names are selected. Large objects remain on Git's normal read path;
+payloads are released after consumption. Directory replay uses per-directory
+indexes rather than scanning every cached object for every directory.
+
+The loose-directory snapshot is limited to 200,000 aggregate entries. One
+additional entry is probed to distinguish overflow from a complete listing;
+overflow discards the snapshot before replaying application callbacks and
+uses Git's complete ordinary scan instead of returning truncated results.
+
+Run `VFSI_LIBRARY=/path/to/libvfsi_c.so sh contrib/vfsi/test-port.sh` to
+check count-objects and fsck parity with zero, tiny, and normal byte budgets.

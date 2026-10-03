@@ -24,10 +24,13 @@ struct vfsi_bindings {
 	int (*dummy_open_mount)(const char *, const char *, struct vfsi_fs **);
 	int (*nfs_open_mount_export)(const char *, const char *, const char *,
 				     struct vfsi_fs **);
+	int (*nfs_from_mount)(const char *, struct vfsi_fs **);
 	int (*listdir)(struct vfsi_fs *, const char *, vfsi_listdir_cb, void *);
 	int (*listdirv)(struct vfsi_fs *, const char *const *, size_t,
 			size_t, bool, vfsi_listdirv_cb, void *);
 	int (*read_paths)(struct vfsi_fs *, const char *const *, size_t,
+			  vfsi_read_paths_cb, void *);
+	int (*read_paths_with_limit)(struct vfsi_fs *, const char *const *, size_t, size_t,
 			  vfsi_read_paths_cb, void *);
 	void (*free)(struct vfsi_fs *);
 };
@@ -67,8 +70,16 @@ struct vfsi_source_context {
 	size_t objects_nr;
 	size_t objects_cap;
 	struct strmap objects_by_path;
+	struct strmap objects_by_dir;
+	size_t data_bytes;
+	size_t data_limit;
 	pthread_mutex_t mutex;
 	int traversal_active;
+};
+
+struct vfsi_object_bucket {
+	size_t *indices;
+	size_t nr, alloc;
 };
 
 static int vfsi_prefetch_enabled(void)
@@ -81,6 +92,14 @@ static int vfsi_prefetch_enabled(void)
 static void vfsi_clear_objects(struct vfsi_source_context *ctx)
 {
 	size_t i;
+	struct hashmap_iter iter;
+	struct strmap_entry *entry;
+	strmap_for_each_entry(&ctx->objects_by_dir, &iter, entry) {
+		struct vfsi_object_bucket *bucket = entry->value;
+		free(bucket->indices);
+		free(bucket);
+	}
+	strmap_clear(&ctx->objects_by_dir, 0);
 
 	strmap_clear(&ctx->objects_by_path, 0);
 	for (i = 0; i < ctx->objects_nr; i++) {
@@ -91,6 +110,7 @@ static void vfsi_clear_objects(struct vfsi_source_context *ctx)
 		free(ctx->objects[i].data);
 	}
 	ctx->objects_nr = 0;
+	ctx->data_bytes = 0;
 }
 
 static struct odb_source_loose *vfsi_loose_source(struct odb_source *source)
@@ -117,6 +137,7 @@ static struct vfsi_source_context *vfsi_source_context(struct odb_source *source
 	if (!ctx && create) {
 		CALLOC_ARRAY(ctx, 1);
 		strmap_init(&ctx->objects_by_path);
+		strmap_init(&ctx->objects_by_dir);
 		if (init_recursive_mutex(&ctx->mutex))
 			die_errno(_("vfsi: cannot initialize source mutex"));
 		loose->vfsi = ctx;
@@ -221,6 +242,12 @@ static int load_vfsi_bindings(const char *library)
 	LOAD_VFSI("vfsi_listdirv", candidate.listdirv);
 	LOAD_VFSI("vfsi_read_paths", candidate.read_paths);
 	LOAD_VFSI("vfsi_free", candidate.free);
+	{
+		void *sym = dlsym(candidate.handle, "vfsi_nfs_from_mount");
+		memcpy(&candidate.nfs_from_mount, &sym, sizeof(sym));
+		sym = dlsym(candidate.handle, "vfsi_read_paths_with_limit");
+		memcpy(&candidate.read_paths_with_limit, &sym, sizeof(sym));
+	}
 #undef LOAD_VFSI
 
 	vfsi_runtime.bindings = candidate;
@@ -354,6 +381,16 @@ static int open_vfsi(struct vfsi_source_context *ctx, const char *objects_path)
 		host_override = getenv("VFSI_HOST");
 		export_override = getenv("VFSI_EXPORT");
 		mount_override = getenv("VFSI_MOUNT");
+		if (!host_override && !export_override && !mount_override) {
+			/* Default discovery inherits security and rejects covering mounts.
+			 * An old adapter cannot do that safely: keep Git's POSIX path. */
+			if (!b->nfs_from_mount)
+				return 0;
+			if (ctx->fs) b->free(ctx->fs);
+			ctx->fs = NULL;
+			rc = b->nfs_from_mount(objects_path, &ctx->fs);
+			return rc ? 0 : 1;
+		}
 		if (!vfsi_mount_for(objects_path, &mount)) {
 			if (!mount_override || !export_override)
 				return 0;
@@ -401,6 +438,8 @@ struct vfsi_walk {
 	struct strvec display_subdirs;
 	const char *display_root;
 	const char *real_root;
+	size_t listed_entries;
+	int listing_overflow;
 };
 
 static int vfsi_attrs_valid(const struct vfsi_attrs *attrs)
@@ -505,6 +544,15 @@ static struct vfsi_object *vfsi_object_add(struct vfsi_source_context *ctx,
 	index_value = (void *)(uintptr_t)(index + 1);
 	strmap_put(&ctx->objects_by_path, obj->display_path, index_value);
 	strmap_put(&ctx->objects_by_path, obj->real_path, index_value);
+	{
+		struct vfsi_object_bucket *bucket = strmap_get(&ctx->objects_by_dir, display_dir);
+		if (!bucket) {
+			CALLOC_ARRAY(bucket, 1);
+			strmap_put(&ctx->objects_by_dir, display_dir, bucket);
+		}
+		ALLOC_GROW(bucket->indices, bucket->nr + 1, bucket->alloc);
+		bucket->indices[bucket->nr++] = index;
+	}
 	return obj;
 }
 
@@ -515,6 +563,12 @@ static bool loose_entry_cb(const char *dir, const char *name,
 	struct vfsi_walk *walk = userdata;
 	const char *display_dir = display_dir_for_real(walk, dir);
 	char *display_path;
+	/* The legacy callback API reports a limit stop as success. Consume an
+	 * extra entry only as an overflow probe, before retaining/replaying it. */
+	if (walk->listed_entries++ == 200000) {
+		walk->listing_overflow = 1;
+		return false;
+	}
 
 	if (!dir || !name || !vfsi_attrs_valid(attrs))
 		return false;
@@ -550,10 +604,13 @@ static bool vfsi_store_read_paths_cb(const char *path,
 	struct vfsi_object *obj = vfsi_find_object(ctx, path);
 	if (!obj)
 		return true;
+	if (len > ctx->data_limit - ctx->data_bytes)
+		return false;
 	free(obj->data);
 	obj->data = xmalloc(len ? len : 1);
 	memcpy(obj->data, data, len);
 	obj->data_len = len;
+	ctx->data_bytes += len;
 	return true;
 }
 
@@ -564,16 +621,44 @@ static int vfsi_prefetch_object_data(struct vfsi_source_context *ctx)
 	size_t next = 0;
 	size_t chunk;
 	int rc = 0;
+	size_t planned = 0;
+	const char *setting = getenv("VFSI_PREFETCH_BYTES");
+	ctx->data_limit = 64 * 1024 * 1024;
+	if (setting) {
+		char *end;
+		unsigned long long value;
+		errno = 0;
+		value = strtoull(setting, &end, 10);
+		if (errno || *end || !*setting || *setting == '-' || value > SIZE_MAX)
+			return -1;
+		ctx->data_limit = (size_t)value;
+	}
 
 	if (!ctx->objects_nr)
 		return 0;
 	paths = xcalloc(ctx->objects_nr, sizeof(*paths));
-	for (i = 0; i < ctx->objects_nr; i++)
-		paths[next++] = ctx->objects[i].real_path;
+	for (i = 0; i < ctx->objects_nr; i++) {
+		struct vfsi_object *obj = &ctx->objects[i];
+		const char *name = obj->name;
+		size_t j, len = strlen(name);
+		if (obj->attrs.ftype != VFSI_NF4REG || (len != 38 && len != 62) ||
+		    obj->attrs.size > ctx->data_limit - planned)
+			continue;
+		for (j = 0; j < len && hexval_table[(unsigned char)name[j]] >= 0; j++) {}
+		if (j != len)
+			continue;
+		planned += obj->attrs.size;
+		paths[next++] = obj->real_path;
+	}
 	for (chunk = 0; chunk < next; chunk += 4096) {
 		size_t count = next - chunk < 4096 ? next - chunk : 4096;
 
-		rc = vfsi_runtime.bindings.read_paths(ctx->fs,
+		if (vfsi_runtime.bindings.read_paths_with_limit)
+			rc = vfsi_runtime.bindings.read_paths_with_limit(ctx->fs,
+				(const char *const *)&paths[chunk], count,
+				ctx->data_limit - ctx->data_bytes, vfsi_store_read_paths_cb, ctx);
+		else
+			rc = vfsi_runtime.bindings.read_paths(ctx->fs,
 						  (const char *const *)&paths[chunk],
 						  count, vfsi_store_read_paths_cb,
 						  ctx);
@@ -640,6 +725,10 @@ int vfsi_read_loose_object(struct odb_source *source, const char *path,
 	*buf = xmalloc(obj->data_len ? obj->data_len : 1);
 	memcpy(*buf, obj->data, obj->data_len);
 	*size = obj->data_len;
+	ctx->data_bytes -= obj->data_len;
+	free(obj->data);
+	obj->data = NULL;
+	obj->data_len = 0;
 	pthread_mutex_unlock(&ctx->mutex);
 	return 1;
 }
@@ -700,14 +789,21 @@ static int vfsi_for_each_loose_file_locked(struct vfsi_source_context *ctx,
 	 * object types while scanning. */
 	qsort(dirs, walk.subdirs.nr, sizeof(*dirs), cmp_subdir_ptr);
 	rc = vfsi_runtime.bindings.listdirv(ctx->fs, dirs, walk.subdirs.nr,
-					0, 0, loose_entry_cb, &walk);
+					200001, 0, loose_entry_cb, &walk);
+	if (walk.listing_overflow) {
+		/* Nothing has been replayed. Let the normal complete scan handle
+		 * this repository; some Git callers ignore enumeration errors. */
+		rc = 0;
+		goto out;
+	}
 	if (rc) {
 		error(_("vfsi: listdirv failed"));
 		goto fail;
 	}
-	if (vfsi_prefetch_enabled() && vfsi_prefetch_object_data(ctx) < 0) {
-		error(_("vfsi: unable to prefetch loose objects"));
-		goto fail;
+	if (vfsi_prefetch_enabled() && vfsi_prefetch_object_data(ctx)) {
+		/* Prefetch is optional; a growth race or tight budget must not turn
+		 * valid repository contents into a failed Git command. */
+		warning(_("vfsi: object prefetch unavailable; using ordinary reads"));
 	}
 	/* Replay each directory in numeric order. Within a directory, retain the
 	 * backend's READDIR order, and invoke subdir_cb immediately after its
@@ -717,12 +813,10 @@ static int vfsi_for_each_loose_file_locked(struct vfsi_source_context *ctx,
 		const char *slash = strrchr(dir, '/');
 		size_t j;
 		unsigned nr;
+		struct vfsi_object_bucket *bucket = strmap_get(&ctx->objects_by_dir, dir);
 
-		for (j = 0; j < ctx->objects_nr; j++) {
-			struct vfsi_object *obj = &ctx->objects[j];
-
-			if (strcmp(obj->display_dir, dir))
-				continue;
+		for (j = 0; bucket && j < bucket->nr; j++) {
+			struct vfsi_object *obj = &ctx->objects[bucket->indices[j]];
 			*result = process_loose_entry(&walk, obj->display_dir,
 						      obj->name);
 			if (*result)

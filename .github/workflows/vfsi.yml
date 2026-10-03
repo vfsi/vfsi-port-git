@@ -48,3 +48,7 @@ jobs:
           VFSI_ROOT="$fixture" \
           VFSI_MOUNT="$fixture" \
             ./git -C "$fixture" count-objects -v >/dev/null
+      - name: Verify bounded prefetch and application parity
+        env:
+          VFSI_LIBRARY: ${{ github.workspace }}/build-vfsi-c/vfsi-c-0.3.1-vnfs-0.0.13/target/release/libvfsi_c.so
+        run: sh contrib/vfsi/test-port.sh
