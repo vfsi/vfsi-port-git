@@ -26,8 +26,9 @@ struct vfsi_bindings {
 				     struct vfsi_fs **);
 	int (*nfs_from_mount)(const char *, struct vfsi_fs **);
 	int (*listdir)(struct vfsi_fs *, const char *, vfsi_listdir_cb, void *);
-	int (*listdirv)(struct vfsi_fs *, const char *const *, size_t,
-			size_t, bool, vfsi_listdirv_cb, void *);
+	int (*listdirs)(struct vfsi_fs *, const char *const *, size_t,
+			const struct vfsi_listing_options *, vfsi_indexed_listdir_cb,
+			void *, struct vfsi_listing_result *);
 	int (*read_paths)(struct vfsi_fs *, const char *const *, size_t,
 			  vfsi_read_paths_cb, void *);
 	int (*read_paths_with_limit)(struct vfsi_fs *, const char *const *, size_t, size_t,
@@ -239,7 +240,7 @@ static int load_vfsi_bindings(const char *library)
 	LOAD_VFSI("vfsi_dummy_open_mount", candidate.dummy_open_mount);
 	LOAD_VFSI("vfsi_nfs_open_mount_export", candidate.nfs_open_mount_export);
 	LOAD_VFSI("vfsi_listdir", candidate.listdir);
-	LOAD_VFSI("vfsi_listdirv", candidate.listdirv);
+	LOAD_VFSI("vfsi_listdirs", candidate.listdirs);
 	LOAD_VFSI("vfsi_read_paths", candidate.read_paths);
 	LOAD_VFSI("vfsi_free", candidate.free);
 	{
@@ -438,8 +439,6 @@ struct vfsi_walk {
 	struct strvec display_subdirs;
 	const char *display_root;
 	const char *real_root;
-	size_t listed_entries;
-	int listing_overflow;
 };
 
 static int vfsi_attrs_valid(const struct vfsi_attrs *attrs)
@@ -556,20 +555,13 @@ static struct vfsi_object *vfsi_object_add(struct vfsi_source_context *ctx,
 	return obj;
 }
 
-static bool loose_entry_cb(const char *dir, const char *name,
+static bool loose_entry_cb(size_t index UNUSED, const char *dir, const char *name,
 			   const struct vfsi_attrs *attrs,
 			   void *userdata)
 {
 	struct vfsi_walk *walk = userdata;
 	const char *display_dir = display_dir_for_real(walk, dir);
 	char *display_path;
-	/* The legacy callback API reports a limit stop as success. Consume an
-	 * extra entry only as an overflow probe, before retaining/replaying it. */
-	if (walk->listed_entries++ == 200000) {
-		walk->listing_overflow = 1;
-		return false;
-	}
-
 	if (!dir || !name || !vfsi_attrs_valid(attrs))
 		return false;
 	if (!display_dir)
@@ -788,16 +780,30 @@ static int vfsi_for_each_loose_file_locked(struct vfsi_source_context *ctx,
 	 * (objects/00 … objects/ff), which fsck relies on when it learns
 	 * object types while scanning. */
 	qsort(dirs, walk.subdirs.nr, sizeof(*dirs), cmp_subdir_ptr);
-	rc = vfsi_runtime.bindings.listdirv(ctx->fs, dirs, walk.subdirs.nr,
-					200001, 0, loose_entry_cb, &walk);
-	if (walk.listing_overflow) {
+	{
+		struct vfsi_listing_options options = {
+			.max_entries = 200000,
+			.max_path_bytes = 64 * 1024 * 1024,
+			.attributes = VFSI_ATTR_MODE | VFSI_ATTR_SIZE | VFSI_ATTR_NLINK |
+				VFSI_ATTR_FILEID | VFSI_ATTR_BLOCKS | VFSI_ATTR_UID |
+				VFSI_ATTR_GID | VFSI_ATTR_ATIME | VFSI_ATTR_MTIME | VFSI_ATTR_CTIME
+		};
+		struct vfsi_listing_result *results = xcalloc(walk.subdirs.nr, sizeof(*results));
+		rc = vfsi_runtime.bindings.listdirs(ctx->fs, dirs, walk.subdirs.nr,
+			&options, loose_entry_cb, &walk, results);
+		for (i = 0; !rc && i < walk.subdirs.nr; i++)
+			if (results[i].completion != 1)
+				rc = EIO;
+		free(results);
+	}
+	if (rc == EFBIG) {
 		/* Nothing has been replayed. Let the normal complete scan handle
 		 * this repository; some Git callers ignore enumeration errors. */
 		rc = 0;
 		goto out;
 	}
 	if (rc) {
-		error(_("vfsi: listdirv failed"));
+		error(_("vfsi: listdirs failed"));
 		goto fail;
 	}
 	if (vfsi_prefetch_enabled() && vfsi_prefetch_object_data(ctx)) {
