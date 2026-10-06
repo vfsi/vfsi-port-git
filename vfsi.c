@@ -171,8 +171,7 @@ void vfsi_source_close(struct odb_source *source)
 	if (ctx->fs && vfsi_runtime.bindings.free)
 		vfsi_runtime.bindings.free(ctx->fs);
 	ctx->fs = NULL;
-	free(ctx->mountpoint);
-	ctx->mountpoint = NULL;
+	FREE_AND_NULL(ctx->mountpoint);
 	pthread_mutex_unlock(&ctx->mutex);
 }
 
@@ -628,7 +627,7 @@ static int vfsi_prefetch_object_data(struct vfsi_source_context *ctx)
 
 	if (!ctx->objects_nr)
 		return 0;
-	paths = xcalloc(ctx->objects_nr, sizeof(*paths));
+	CALLOC_ARRAY(paths, ctx->objects_nr);
 	for (i = 0; i < ctx->objects_nr; i++) {
 		struct vfsi_object *obj = &ctx->objects[i];
 		const char *name = obj->name;
@@ -718,8 +717,7 @@ int vfsi_read_loose_object(struct odb_source *source, const char *path,
 	memcpy(*buf, obj->data, obj->data_len);
 	*size = obj->data_len;
 	ctx->data_bytes -= obj->data_len;
-	free(obj->data);
-	obj->data = NULL;
+	FREE_AND_NULL(obj->data);
 	obj->data_len = 0;
 	pthread_mutex_unlock(&ctx->mutex);
 	return 1;
@@ -773,13 +771,13 @@ static int vfsi_for_each_loose_file_locked(struct vfsi_source_context *ctx,
 	if (!walk.subdirs.nr)
 		goto done;
 
-	dirs = xcalloc(walk.subdirs.nr, sizeof(*dirs));
+	CALLOC_ARRAY(dirs, walk.subdirs.nr);
 	for (i = 0; i < walk.subdirs.nr; i++)
 		dirs[i] = walk.subdirs.v[i];
 	/* Match the normal implementation's numeric subdirectory order
 	 * (objects/00 … objects/ff), which fsck relies on when it learns
 	 * object types while scanning. */
-	qsort(dirs, walk.subdirs.nr, sizeof(*dirs), cmp_subdir_ptr);
+	QSORT(dirs, walk.subdirs.nr, cmp_subdir_ptr);
 	{
 		struct vfsi_listing_options options = {
 			.max_entries = 200000,
