@@ -16,23 +16,23 @@ permissions:
 
 jobs:
   test:
-    # libntirpc >= 6.3 is required; Ubuntu 24.04 ships only 4.3.
+    # The public native dependency builds pinned ntirpc source.
     runs-on: ubuntu-26.04
-    name: VNFS 0.0.19 / VFSI C ABI v3
+    name: VNFS 0.0.20 / VFSI C ABI v3
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang cmake libclang-dev libgssglue-dev \
-            libkrb5-dev libntirpc-dev liburcu-dev make patch pkg-config
+          sudo apt-get install -y clang cmake libclang-dev \
+            libkrb5-dev liburcu-dev make pkg-config
       - name: Build VFSI from public crates
         run: contrib/vfsi/build-vfsi-c
       - name: Build Git with VFSI
         run: |
           make -j2 USE_VFSI=YesPlease \
-            VFSI_CFLAGS="-I$PWD/build-vfsi-c/vfsi-c-0.3.5-vnfs-0.0.19/source/include" \
+            VFSI_CFLAGS="-I$PWD/build-vfsi-c/vfsi-c-0.3.6-vnfs-0.0.20/source/include" \
             NO_CURL=YesPlease NO_GETTEXT=YesPlease NO_TCLTK=YesPlease git
       - name: Smoke test the public VFSI library
         run: |
@@ -45,11 +45,11 @@ jobs:
           git -C "$fixture" add input
           git -C "$fixture" commit --quiet -m smoke
           VFSI_IMPL=dummy \
-          VFSI_LIBRARY="$PWD/build-vfsi-c/vfsi-c-0.3.5-vnfs-0.0.19/target/release/libvfsi_c.so" \
+          VFSI_LIBRARY="$PWD/build-vfsi-c/vfsi-c-0.3.6-vnfs-0.0.20/target/release/libvfsi_c.so" \
           VFSI_ROOT="$fixture" \
           VFSI_MOUNT="$fixture" \
             ./git -C "$fixture" count-objects -v >/dev/null
       - name: Verify bounded prefetch and application parity
         env:
-          VFSI_LIBRARY: ${{ github.workspace }}/build-vfsi-c/vfsi-c-0.3.5-vnfs-0.0.19/target/release/libvfsi_c.so
+          VFSI_LIBRARY: ${{ github.workspace }}/build-vfsi-c/vfsi-c-0.3.6-vnfs-0.0.20/target/release/libvfsi_c.so
         run: sh contrib/vfsi/test-port.sh
