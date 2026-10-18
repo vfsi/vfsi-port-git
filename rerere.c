@@ -476,8 +476,11 @@ static int handle_file(struct index_state *istate,
 			unlink_or_warn(output);
 		return error(_("could not parse conflict hunks in '%s'"), path);
 	}
-	if (io.io.wrerror)
+	if (io.io.wrerror) {
+		if (output)
+			unlink_or_warn(output);
 		return -1;
+	}
 	return has_conflicts;
 }
 
@@ -597,7 +600,7 @@ int rerere_remaining(struct repository *r, struct string_list *merge_rr)
  */
 static int try_merge(struct index_state *istate,
 		     const struct rerere_id *id, const char *path,
-		     mmfile_t *cur, mmbuffer_t *result)
+		     mmfile_t *cur, mmfile_t *result)
 {
 	enum ll_merge_result ret;
 	mmfile_t base = {NULL, 0}, other = {NULL, 0};
@@ -638,7 +641,7 @@ static int merge(struct index_state *istate, const struct rerere_id *id, const c
 	int ret;
 	struct strbuf buf = STRBUF_INIT;
 	mmfile_t cur = {NULL, 0};
-	mmbuffer_t result = {NULL, 0};
+	mmfile_t result = {NULL, 0};
 
 	/*
 	 * Normalize the conflicts in path and write it out to
@@ -729,8 +732,25 @@ static void do_rerere_one_path(struct index_state *istate,
 
 	/* Has the user resolved it already? */
 	if (variant >= 0) {
-		if (!handle_file(istate, path, NULL, NULL)) {
-			copy_file(the_repository, rerere_path(&buf, id, "postimage"), path, 0666);
+		int ret = handle_file(istate, path, NULL, NULL);
+
+		if (ret < 0)
+			goto out;
+		if (!ret) {
+			const int had_postimage =
+				id->collection->status[variant] & RR_HAS_POSTIMAGE;
+			const char *postimage =
+				rerere_path(&buf, id, "postimage");
+
+			if (copy_file(the_repository,
+				      postimage,
+				      path, 0666)) {
+				if (!had_postimage)
+					unlink_or_warn(postimage);
+				error_errno(_("could not copy resolution for '%s'"),
+					    path);
+				goto out;
+			}
 			id->collection->status[variant] |= RR_HAS_POSTIMAGE;
 			fprintf_ln(stderr, _("Recorded resolution for '%s'."), path);
 			free_rerere_id(rr_item);
@@ -778,7 +798,9 @@ static void do_rerere_one_path(struct index_state *istate,
 	assign_variant(id);
 
 	variant = id->variant;
-	handle_file(istate, path, NULL, rerere_path(&buf, id, "preimage"));
+	if (handle_file(istate, path, NULL,
+			rerere_path(&buf, id, "preimage")) < 0)
+		goto out;
 	if (id->collection->status[variant] & RR_HAS_POSTIMAGE) {
 		const char *path = rerere_path(&buf, id, "postimage");
 		if (unlink(path))
@@ -947,7 +969,7 @@ static int handle_cache(struct index_state *istate,
 			const char *path, unsigned char *hash, const char *output)
 {
 	mmfile_t mmfile[3] = {{NULL}};
-	mmbuffer_t result = {NULL, 0};
+	mmfile_t result = {NULL, 0};
 	const struct cache_entry *ce;
 	int pos, len, i, has_conflicts;
 	struct rerere_io_mem io;
@@ -1039,8 +1061,8 @@ static int rerere_forget_one_path(struct index_state *istate,
 	for (id->variant = 0;
 	     id->variant < id->collection->status_nr;
 	     id->variant++) {
-		mmfile_t cur = { NULL, 0 };
-		mmbuffer_t result = {NULL, 0};
+		mmfile_t cur;
+		mmfile_t result = {NULL, 0};
 		int cleanly_resolved;
 
 		if (!has_rerere_resolution(id))
@@ -1048,7 +1070,6 @@ static int rerere_forget_one_path(struct index_state *istate,
 
 		handle_cache(istate, path, hash, rerere_path(&buf, id, "thisimage"));
 		if (read_mmfile(&cur, rerere_path(&buf, id, "thisimage"))) {
-			free(cur.ptr);
 			error(_("failed to update conflicted state in '%s'"), path);
 			goto fail_exit;
 		}
