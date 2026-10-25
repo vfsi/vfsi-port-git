@@ -11,6 +11,7 @@ GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
 . ./test-lib.sh
+GNUPGHOME_NOT_USED=$GNUPGHOME
 . "$TEST_DIRECTORY"/lib-gpg.sh
 . "$TEST_DIRECTORY"/lib-terminal.sh
 
@@ -1525,8 +1526,7 @@ test_expect_success GPGSM 'git tag -s fails if gpgsm is misconfigured (bad signa
 # try to verify without gpg:
 
 test_expect_success GPG 'verify signed tag fails when public key is not present' '
-	rm -rf gpghome &&
-	test_must_fail git tag -v signed-tag
+	test_must_fail env GNUPGHOME="$GNUPGHOME_NOT_USED" git tag -v signed-tag
 '
 
 test_expect_success 'git tag -a fails if tag annotation is empty' '
@@ -1887,7 +1887,7 @@ test_expect_success 'recursive tagging should give advice' '
 	hint: already a tag. If you meant to tag the object that it points to, use:
 	hint:
 	hint: 	git tag -f nested annotated-v4.0^{}
-	hint: Disable this message with "git config set advice.nestedTag false"
+	hint: Disable this message with "git config set --global advice.nestedTag false"
 	EOF
 	git tag -m nested nested annotated-v4.0 2>actual &&
 	test_cmp expect actual

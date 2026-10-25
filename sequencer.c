@@ -1781,7 +1781,10 @@ static int do_commit(struct repository *r,
 		if (is_rebase_i(opts) && oid)
 			if (write_rebase_head(oid))
 			    return -1;
-		return run_git_commit(msg_file, reflog_action, opts, flags);
+		res = run_git_commit(msg_file, reflog_action, opts, flags);
+		if (!res && is_rebase_i(opts) && oid)
+			refs_delete_ref(get_main_ref_store(r), "", "REBASE_HEAD",
+					NULL, REF_NO_DEREF);
 	}
 
 	return res;
@@ -5177,6 +5180,11 @@ static int pick_commits(struct repository *r,
 	unlink(rebase_path_stopped_sha());
 	unlink(rebase_path_amend());
 	unlink(rebase_path_patch());
+	unlink(git_path_merge_labels(r));
+	refs_delete_ref(get_main_ref_store(r), "", "AUTO_MERGE", NULL,
+			REF_NO_DEREF);
+	refs_delete_ref(get_main_ref_store(r), "", "REBASE_HEAD", NULL,
+			REF_NO_DEREF);
 
 	while (todo_list->current < todo_list->nr) {
 		struct todo_item *item = todo_list->items + todo_list->current;
@@ -5203,10 +5211,6 @@ static int pick_commits(struct repository *r,
 			}
 			unlink(rebase_path_author_script());
 			unlink(git_path_merge_head(r));
-			refs_delete_ref(get_main_ref_store(r), "", "AUTO_MERGE",
-					NULL, REF_NO_DEREF);
-			refs_delete_ref(get_main_ref_store(r), "", "REBASE_HEAD",
-					NULL, REF_NO_DEREF);
 
 			if (item->command == TODO_BREAK) {
 				if (!opts->verbose)
@@ -6617,11 +6621,11 @@ static int add_decorations_to_list(const struct commit *commit,
 				   struct todo_add_branch_context *ctx)
 {
 	const struct name_decoration *decoration = get_name_decoration(&commit->object);
-	const char *head_ref = refs_resolve_ref_unsafe(get_main_ref_store(the_repository),
-						       "HEAD",
-						       RESOLVE_REF_READING,
-						       NULL,
-						       NULL);
+	char *head_ref = refs_resolve_refdup(get_main_ref_store(the_repository),
+					     "HEAD",
+					     RESOLVE_REF_READING,
+					     NULL,
+					     NULL);
 
 	while (decoration) {
 		struct todo_item *item;
@@ -6673,6 +6677,7 @@ static int add_decorations_to_list(const struct commit *commit,
 		decoration = decoration->next;
 	}
 
+	free(head_ref);
 	return 0;
 }
 

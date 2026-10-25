@@ -379,7 +379,10 @@ static void check_connectivity(struct repository *repo)
 	/* Look up all the requirements, warn about missing objects.. */
 	max = get_max_object_index(repo);
 	if (verbose)
-		fprintf_ln(stderr, _("Checking connectivity (%d objects)"), max);
+		fprintf_ln(stderr, Q_("Checking connectivity (%d object)",
+				      "Checking connectivity (%d objects)",
+				      max),
+			   max);
 
 	for (i = 0; i < max; i++) {
 		struct object *obj = get_indexed_object(repo, i);
@@ -868,7 +871,6 @@ int cmd_fsck(int argc,
 		OPT_BOOL(0, "references", &check_references, N_("check reference database consistency")),
 		OPT_END(),
 	};
-	struct odb_source *source;
 	struct snapshot snap = {
 		.nr = 0,
 		.alloc = 0,
@@ -983,13 +985,14 @@ int cmd_fsck(int argc,
 	check_connectivity(repo);
 
 	if (repo->settings.core_commit_graph) {
+		struct odb_source_files *files = odb_source_files_downcast(repo->objects->source);
 		struct child_process commit_graph_verify = CHILD_PROCESS_INIT;
 
-		for (source = repo->objects->sources; source; source = source->next) {
+		for (struct odb_files_dir *dir = files->dirs; dir; dir = dir->next) {
 			child_process_init(&commit_graph_verify);
 			commit_graph_verify.git_cmd = 1;
 			strvec_pushl(&commit_graph_verify.args, "commit-graph",
-				     "verify", "--object-dir", source->path, NULL);
+				     "verify", "--object-dir", dir->abspath, NULL);
 			if (show_progress)
 				strvec_push(&commit_graph_verify.args, "--progress");
 			else

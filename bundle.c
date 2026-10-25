@@ -239,7 +239,7 @@ int verify_bundle(struct repository *r,
 		.quiet = 1,
 	};
 
-	if (!r || !r->objects || !r->objects->sources)
+	if (!r || !r->objects || !r->objects->source)
 		return error(_("need a repository to verify a bundle"));
 
 	for (i = 0; i < p->nr; i++) {
@@ -259,7 +259,7 @@ int verify_bundle(struct repository *r,
 	if (ret)
 		goto cleanup;
 
-	if ((ret = check_connected(iterate_ref_map, &iter, &opts)))
+	if ((ret = check_connected(r, iterate_ref_map, &iter, &opts)))
 		error(_("some prerequisite commits exist in the object store, "
 			"but are not connected to the repository's history"));
 
@@ -492,7 +492,7 @@ int create_bundle(struct repository *r, const char *path,
 	int bundle_fd = -1;
 	int bundle_to_stdout;
 	int ref_count = 0;
-	struct rev_info revs, revs_copy;
+	struct rev_info revs, revs_copy = { 0 };
 	int min_version = 2;
 	struct bundle_prerequisites_info bpi;
 	int ret;

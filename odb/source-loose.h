@@ -32,11 +32,13 @@ struct odb_source_loose {
 
 	/* State owned by the optional vectorized filesystem integration. */
 	struct vfsi_source_context *vfsi;
+
+	/* Whether this is a source that will never be committed to disk. */
+	int will_destroy;
 };
 
 struct odb_source_loose *odb_source_loose_new(struct object_database *odb,
-					      const char *path,
-					      bool local);
+					      const char *path);
 
 /*
  * Cast the given object database source to the loose backend. This will cause

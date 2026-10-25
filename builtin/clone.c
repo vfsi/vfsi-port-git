@@ -572,7 +572,7 @@ static void update_remote_refs(const struct ref *refs,
 		opt.transport = transport;
 		opt.progress = transport->progress;
 
-		if (check_connected(iterate_ref_map, &rm, &opt))
+		if (check_connected(the_repository, iterate_ref_map, &rm, &opt))
 			die(_("remote did not send all necessary objects"));
 	}
 
@@ -1134,7 +1134,7 @@ int cmd_clone(int argc,
 	sigchain_push_common(remove_junk_on_signal);
 
 	if (!option_bare) {
-		if (safe_create_leading_directories_const(the_repository, work_tree) < 0)
+		if (safe_create_leading_directories_no_share_const(work_tree) < 0)
 			die_errno(_("could not create leading directories of '%s'"),
 				  work_tree);
 		if (dest_exists)
@@ -1154,7 +1154,7 @@ int cmd_clone(int argc,
 			junk_git_dir_flags |= REMOVE_DIR_KEEP_TOPLEVEL;
 		junk_git_dir = git_dir;
 	}
-	if (safe_create_leading_directories_const(the_repository, git_dir) < 0)
+	if (safe_create_leading_directories_no_share_const(git_dir) < 0)
 		die(_("could not create leading directories of '%s'"), git_dir);
 
 	if (0 <= option_verbosity) {

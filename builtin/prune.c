@@ -211,9 +211,9 @@ int cmd_prune(int argc,
 	{
 		struct prune_data prune_data = {
 			.revs = &revs,
-			.source = repo->objects->sources,
+			.source = repo->objects->source,
 		};
-		for_each_loose_file_in_source(repo->objects->sources,
+		for_each_loose_file_in_source(repo->objects->source,
 					      prune_object, prune_cruft,
 					      prune_subdir, &prune_data);
 	}
