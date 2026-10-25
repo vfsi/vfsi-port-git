@@ -24,21 +24,30 @@ const char *odb_source_type_to_name(enum odb_source_type type)
 }
 
 struct odb_source *odb_source_new(struct object_database *odb,
-				  const char *path,
-				  bool local)
+				  enum object_storage_format format,
+				  const char *payload,
+				  enum odb_new_flags flags)
 {
-	return &odb_source_files_new(odb, path, local)->base;
+	struct odb_source *source;
+
+	switch (format) {
+	case OBJECT_STORAGE_FORMAT_FILES:
+		source = &odb_source_files_new(odb, payload, flags)->base;
+		break;
+	default:
+		BUG("unknown object storage format");
+	}
+
+	return source;
 }
 
 void odb_source_init(struct odb_source *source,
 		     struct object_database *odb,
 		     enum odb_source_type type,
-		     const char *path,
-		     bool local)
+		     const char *path)
 {
 	source->odb = odb;
 	source->type = type;
-	source->local = local;
 	source->path = xstrdup(path);
 }
 

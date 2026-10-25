@@ -22,6 +22,11 @@ enum ref_storage_format {
 	REF_STORAGE_FORMAT_REFTABLE,
 };
 
+enum object_storage_format {
+	OBJECT_STORAGE_FORMAT_UNKNOWN,
+	OBJECT_STORAGE_FORMAT_FILES,
+};
+
 #ifdef WITH_BREAKING_CHANGES /* Git 3.0 */
 # define REF_STORAGE_FORMAT_DEFAULT REF_STORAGE_FORMAT_REFTABLE
 #else
@@ -36,6 +41,7 @@ struct repo_path_cache {
 	char *merge_head;
 	char *fetch_head;
 	char *shallow;
+	char *merge_labels;
 };
 
 struct repository {
@@ -178,11 +184,27 @@ struct repository {
 	 */
 	char *ref_storage_payload;
 
+	/* Repository's object storage format, as serialized on disk. */
+	enum object_storage_format object_storage_format;
+
+	/*
+	 * Object storage information as needed for the backend. This contains
+	 * only the payload from the object storage format URI without the
+	 * schema.
+	 */
+	char *object_storage_payload;
+
 	/* A unique-id for tracing purposes. */
 	int trace2_repo_id;
 
 	/* True if commit-graph has been disabled within this process. */
 	int commit_graph_disabled;
+
+	/*
+	 * Indicates whether the rerere-cache has been enabled. -1 (the default
+	 * value) causes us to perform auto-detection via ".git/rr-cache".
+	 */
+	int rerere_cache_enabled;
 
 	/*
 	 * Controls whether the repository should lazily fetch missing
@@ -255,9 +277,13 @@ void repo_set_compat_hash_algo(struct repository *repo, uint32_t compat_algo);
 void repo_set_ref_storage_format(struct repository *repo,
 				 enum ref_storage_format format,
 				 const char *payload);
+void repo_set_object_storage_format(struct repository *repo,
+				    enum object_storage_format format,
+				    const char *payload);
 void initialize_repository(struct repository *repo);
 RESULT_MUST_BE_USED
 int repo_init(struct repository *r, const char *gitdir, const char *worktree);
+void repo_clear(struct repository *repo);
 
 /*
  * Initialize the repository 'subrepo' as the submodule at the given path. If
@@ -273,7 +299,6 @@ int repo_submodule_init(struct repository *subrepo,
 			struct repository *superproject,
 			const char *path,
 			const struct object_id *treeish_name);
-void repo_clear(struct repository *repo);
 
 /*
  * Populates the repository's index from its index_file, an index struct will
@@ -294,6 +319,13 @@ int repo_read_index_unmerged(struct repository *);
  * The lockfile is always committed or rolled back.
  */
 void repo_update_index_if_able(struct repository *, struct lock_file *);
+
+/*
+ * Like repo_update_index_if_able(), but take the lock only if the index
+ * has something to write, so that a caller that read the index without
+ * the lock holds it only for the write.
+ */
+void repo_lock_and_update_index_if_able(struct repository *);
 
 /*
  * Return 1 if upgrade repository format to target_version succeeded,

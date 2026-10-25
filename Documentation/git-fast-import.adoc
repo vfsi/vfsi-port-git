@@ -59,20 +59,25 @@ OPTIONS
 	allowing fast-import to access the filesystem outside of the
 	repository). These options are disabled by default, but can be
 	allowed by providing this option on the command line.  This
-	currently impacts only the `export-marks`, `import-marks`, and
-	`import-marks-if-exists` feature commands.
+	currently impacts the following feature commands:
++
+--
+* `export-marks`
+* `import-marks-if-exists`
+* `import-marks`
+* `rewrite-submodules-from`
+* `rewrite-submodules-to`
+--
+And the following options:
++
+--
+* `export-pack-edges`
+--
 +
 Only enable this option if you trust the program generating the
 fast-import stream! This option is enabled automatically for
 remote-helpers that use the `import` capability, as they are
 already trusted to run their own code.
-+
-Note that this option has to be spelled in full, and has to appear
-before any option whose value is separated from it by a space, for
-the unsafe `feature` commands in the stream to be allowed. So
-`--allow-unsafe` or `--depth 5 --allow-unsafe-features` still refuse
-them, while `--allow-unsafe-features --depth 5` and
-`--depth=5 --allow-unsafe-features` allow them.
 
 `--signed-tags=<mode>`::
 	Specify how to handle signed tags. Behaves in the same way as

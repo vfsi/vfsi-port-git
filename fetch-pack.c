@@ -1075,7 +1075,7 @@ static int get_pack(struct fetch_pack_args *args,
 		die(_("fetch-pack: unable to fork off %s"), cmd_name);
 	if (do_keep && (pack_lockfiles || fsck_objects)) {
 		int is_well_formed;
-		char *pack_lockfile = index_pack_lockfile(the_repository->objects->sources,
+		char *pack_lockfile = index_pack_lockfile(the_repository->objects->source,
 							  cmd.out,
 							  &is_well_formed);
 
@@ -2186,7 +2186,8 @@ struct ref *fetch_pack(struct fetch_pack_args *args,
 		opt.shallow_file = alternate_shallow_file;
 		if (args->deepen)
 			opt.is_deepening_fetch = 1;
-		if (check_connected(iterate_ref_map, &iterator, &opt)) {
+		if (check_connected(the_repository, iterate_ref_map,
+				    &iterator, &opt)) {
 			error(_("remote did not send all necessary objects"));
 			free_refs(ref_cpy);
 			ref_cpy = NULL;

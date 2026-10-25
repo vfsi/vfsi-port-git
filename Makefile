@@ -812,9 +812,11 @@ X =
 PROGRAMS += $(patsubst %.o,git-%$X,$(PROGRAM_OBJS))
 
 TEST_BUILTINS_OBJS += test-advise.o
+TEST_BUILTINS_OBJS += test-base85.o
 TEST_BUILTINS_OBJS += test-bitmap.o
 TEST_BUILTINS_OBJS += test-bloom.o
 TEST_BUILTINS_OBJS += test-bundle-uri.o
+TEST_BUILTINS_OBJS += test-cache-entry.o
 TEST_BUILTINS_OBJS += test-cache-tree.o
 TEST_BUILTINS_OBJS += test-chmtime.o
 TEST_BUILTINS_OBJS += test-config.o
@@ -1347,6 +1349,7 @@ LIB_OBJS += trailer.o
 LIB_OBJS += transport-helper.o
 LIB_OBJS += transport.o
 LIB_OBJS += tree-diff.o
+LIB_OBJS += tree-verify.o
 LIB_OBJS += tree-walk.o
 LIB_OBJS += tree.o
 LIB_OBJS += unpack-trees.o
@@ -3061,7 +3064,7 @@ $(LIB_FILE): $(LIB_OBJS)
 ifndef NO_RUST
 ifeq ($(RUST_TARGETS),)
 $(RUST_LIB): Cargo.toml $(RUST_SOURCES) $(LIB_FILE)
-	$(QUIET_CARGO)cargo build $(CARGO_ARGS)
+	$(QUIET_CARGO)cargo build $(CARGO_ARGS) --target-dir target
 else
 ifneq ($(words $(RUST_TARGETS)),1)
 ifneq ($(uname_S),Darwin)
@@ -3071,7 +3074,7 @@ endif
 
 RUST_MEMBER_LIBS = $(foreach target,$(RUST_TARGETS),target/$(target)/$(RUST_BUILD_CONFIG)/$(RUST_LIB_NAME))
 $(RUST_MEMBER_LIBS): target/%/$(RUST_BUILD_CONFIG)/$(RUST_LIB_NAME): Cargo.toml $(RUST_SOURCES) $(LIB_FILE)
-	$(QUIET_CARGO)cargo build $(CARGO_ARGS) --target $*
+	$(QUIET_CARGO)cargo build $(CARGO_ARGS) --target-dir target --target $*
 
 $(RUST_LIB): $(RUST_MEMBER_LIBS)
 	$(call mkdir_p_parent_template)

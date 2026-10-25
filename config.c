@@ -92,7 +92,7 @@ static long config_file_ftell(struct config_source *conf)
 static int config_buf_fgetc(struct config_source *conf)
 {
 	if (conf->u.buf.pos < conf->u.buf.len)
-		return conf->u.buf.buf[conf->u.buf.pos++];
+		return (unsigned char)conf->u.buf.buf[conf->u.buf.pos++];
 
 	return EOF;
 }
@@ -101,7 +101,7 @@ static int config_buf_ungetc(int c, struct config_source *conf)
 {
 	if (conf->u.buf.pos > 0) {
 		conf->u.buf.pos--;
-		if (conf->u.buf.buf[conf->u.buf.pos] != c)
+		if ((unsigned char)conf->u.buf.buf[conf->u.buf.pos] != c)
 			BUG("config_buf can only ungetc the same character");
 		return c;
 	}
@@ -316,6 +316,21 @@ static int include_by_branch(struct config_include_data *data,
 	return ret;
 }
 
+static int include_by_hostname(const char *cond, size_t cond_len)
+{
+	int ret;
+	char my_host[HOST_NAME_MAX + 1];
+	char *pattern;
+
+	if (xgethostname(my_host, sizeof(my_host)))
+		return 0;
+
+	pattern = xmemdupz(cond, cond_len);
+	ret = !wildmatch(pattern, my_host, 0);
+	free(pattern);
+	return ret;
+}
+
 static int add_remote_url(const char *var, const char *value,
 			  const struct config_context *ctx UNUSED, void *data)
 {
@@ -411,6 +426,8 @@ static int include_condition_is_true(const struct key_value_info *kvi,
 	else if (skip_prefix_mem(cond, cond_len, "hasconfig:remote.*.url:", &cond,
 				   &cond_len))
 		return include_by_remote_url(inc, cond, cond_len);
+	else if (skip_prefix_mem(cond, cond_len, "hostname:", &cond, &cond_len))
+		return include_by_hostname(cond, cond_len);
 
 	/* unknown conditionals are always false */
 	return 0;
@@ -3065,6 +3082,28 @@ int repo_config_set_multivar_in_file_gently(struct repository *r,
 
 	if (!config_filename)
 		config_filename = filename_buf = repo_git_path(r, "config");
+
+	/*
+	 * Do not allow updating a read-only configuration file; it is
+	 * annoying and alarming that "chmod a-w $HOME/.gitconfig" does not
+	 * prevent the global configuration file from getting clobbered by
+	 * mistake with the usual "create a new lockfile, copy the original
+	 * while setting a new value, propagate the permission bits to the
+	 * lockfile, and then rename it to replace the original" dance.
+	 */
+	if (!access(config_filename, W_OK)) {
+		; /* happy: we can write to it */
+	} else if (errno == ENOENT) {
+		; /* happy: we are creating this file anew */
+	} else {
+		/*
+		 * most likely EACCES but other errors also indicate
+		 * that we cannot write to it anyway.
+		 */
+		error_errno(_("file %s unwritable"), config_filename);
+		ret = CONFIG_NO_WRITE;
+		goto out_free;
+	}
 
 	/*
 	 * The lock serves a purpose in addition to locking: the new

@@ -1,5 +1,4 @@
 #include "git-compat-util.h"
-#include "dir.h"
 #include "midx.h"
 #include "odb.h"
 #include "packfile.h"
@@ -59,10 +58,10 @@ void repack_remove_redundant_pack(struct repository *repo, const char *dir_name,
 				  bool wrote_incremental_midx)
 {
 	struct strbuf buf = STRBUF_INIT;
-	struct odb_source_files *files = odb_source_files_downcast(repo->objects->sources);
-	struct multi_pack_index *m = get_multi_pack_index(files->packed);
+	struct odb_source_files *files = odb_source_files_downcast(repo->objects->source);
+	struct multi_pack_index *m = get_multi_pack_index(files->dirs->packed);
 	strbuf_addf(&buf, "%s.pack", base_name);
-	if (m && files->base.local && midx_contains_pack(m, buf.buf)) {
+	if (m && files->dirs->local && midx_contains_pack(m, buf.buf)) {
 		clear_midx_file(repo);
 		if (!wrote_incremental_midx)
 			clear_incremental_midx_files(repo, NULL);
@@ -131,7 +130,6 @@ void existing_packs_collect(struct existing_packs *existing,
 	struct strbuf buf = STRBUF_INIT;
 
 	repo_for_each_pack(existing->repo, p) {
-		size_t i;
 		const char *base;
 
 		if (p->multi_pack_index)
@@ -142,15 +140,11 @@ void existing_packs_collect(struct existing_packs *existing,
 
 		base = pack_basename(p);
 
-		for (i = 0; i < extra_keep->nr; i++)
-			if (!fspathcmp(base, extra_keep->items[i].string))
-				break;
-
 		strbuf_reset(&buf);
 		strbuf_addstr(&buf, base);
 		strbuf_strip_suffix(&buf, ".pack");
 
-		if ((extra_keep->nr > 0 && i < extra_keep->nr) || p->pack_keep)
+		if (p->pack_keep || string_list_has_string(extra_keep, base))
 			string_list_append(&existing->kept_packs, buf.buf);
 		else if (p->is_cruft)
 			string_list_append(&existing->cruft_packs, buf.buf);
@@ -158,7 +152,7 @@ void existing_packs_collect(struct existing_packs *existing,
 			string_list_append(&existing->non_kept_packs, buf.buf);
 	}
 
-	existing->source = existing->repo->objects->sources;
+	existing->source = existing->repo->objects->source;
 
 	string_list_sort(&existing->kept_packs);
 	string_list_sort(&existing->non_kept_packs);

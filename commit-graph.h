@@ -21,7 +21,7 @@
  * call this method outside of a builtin, and only if you know what
  * you are doing!
  */
-void git_test_write_commit_graph_or_die(struct odb_source *source);
+void git_test_write_commit_graph_or_die(struct repository *repo);
 
 struct commit;
 struct bloom_filter_settings;
@@ -29,8 +29,9 @@ struct repository;
 struct object_database;
 struct string_list;
 
-char *get_commit_graph_filename(struct odb_source *source);
-char *get_commit_graph_chain_filename(struct odb_source *source);
+char *get_commit_graph_filename(const char *dir);
+char *get_commit_graph_chain_filename(const char *dir);
+struct commit_graph *prepare_commit_graph(struct repository *r);
 int open_commit_graph(const char *graph_file, int *fd, struct stat *st);
 int open_commit_graph_chain(const char *chain_file, int *fd, struct stat *st,
 			    const struct git_hash_algo *hash_algo);
@@ -85,12 +86,13 @@ struct commit_graph {
 	const unsigned char *data;
 	size_t data_len;
 
+	struct repository *repo;
 	const struct git_hash_algo *hash_algo;
 	unsigned char num_chunks;
 	uint32_t num_commits;
 	struct object_id oid;
+	char *dir;
 	char *filename;
-	struct odb_source *odb_source;
 
 	uint32_t num_commits_in_base;
 	unsigned int read_generation_data;
@@ -114,20 +116,28 @@ struct commit_graph {
 	struct bloom_filter_settings *bloom_filter_settings;
 };
 
-struct commit_graph *load_commit_graph_one_fd_st(struct odb_source *source,
+/*
+ * Load commit graphs from the given object directory `dir`. The directory may
+ * be given as a relative path; it is canonicalized internally so that graphs
+ * loaded from the same directory compare equal regardless of how the caller
+ * spelled the path.
+ */
+struct commit_graph *load_commit_graph_one_fd_st(struct repository *repo,
+						 const char *dir,
 						 int fd, struct stat *st);
 struct commit_graph *load_commit_graph_chain_fd_st(struct object_database *odb,
 						   int fd, struct stat *st,
 						   int *incomplete_chain);
-struct commit_graph *read_commit_graph_one(struct odb_source *source);
+struct commit_graph *read_commit_graph_one(struct repository *repo,
+					   const char *dir);
 
 struct repo_settings;
 
 /*
  * Callers should initialize the repo_settings with prepare_repo_settings()
- * prior to calling parse_commit_graph().
+ * prior to calling commit_graph_parse().
  */
-struct commit_graph *parse_commit_graph(struct repository *r,
+struct commit_graph *commit_graph_parse(struct repository *r,
 					void *graph_map, size_t graph_size);
 
 /*
@@ -150,6 +160,7 @@ enum commit_graph_write_flags {
 	COMMIT_GRAPH_WRITE_SPLIT      = (1 << 2),
 	COMMIT_GRAPH_WRITE_BLOOM_FILTERS = (1 << 3),
 	COMMIT_GRAPH_NO_WRITE_BLOOM_FILTERS = (1 << 4),
+	COMMIT_GRAPH_WRITE_REACHABLE  = (1 << 5),
 };
 
 enum commit_graph_split_flags {
@@ -158,7 +169,10 @@ enum commit_graph_split_flags {
 	COMMIT_GRAPH_SPLIT_REPLACE          = 2
 };
 
-struct commit_graph_opts {
+struct commit_graph_write_options {
+	enum commit_graph_write_flags flags;
+	const struct string_list *pack_indexes;
+	struct oidset *commits;
 	int size_multiple;
 	int max_commits;
 	timestamp_t expire_time;
@@ -166,27 +180,35 @@ struct commit_graph_opts {
 	int max_new_filters;
 };
 
+#define COMMIT_GRAPH_WRITE_OPTIONS_INIT { \
+	.size_multiple = 2, \
+	.max_new_filters = -1, \
+}
+
 /*
- * The write_commit_graph* methods return zero on success
+ * The commit_graph_write* methods return zero on success
  * and a negative value on failure. Note that if the repository
  * is not compatible with the commit-graph feature, then the
  * methods will return 0 without writing a commit-graph.
+ *
+ * The object directory `dir` may be given as a relative path; it is
+ * canonicalized internally so that it compares equal to the directory of
+ * graphs that have already been loaded.
  */
-int write_commit_graph_reachable(struct odb_source *source,
-				 enum commit_graph_write_flags flags,
-				 const struct commit_graph_opts *opts);
-int write_commit_graph(struct odb_source *source,
-		       const struct string_list *pack_indexes,
-		       struct oidset *commits,
-		       enum commit_graph_write_flags flags,
-		       const struct commit_graph_opts *opts);
+int commit_graph_write(struct repository *r,
+		       const char *dir,
+		       const struct commit_graph_write_options *opts);
 
-#define COMMIT_GRAPH_VERIFY_SHALLOW	(1 << 0)
+enum commit_graph_verify_flags {
+	COMMIT_GRAPH_VERIFY_SHALLOW = (1 << 0),
+	COMMIT_GRAPH_VERIFY_PROGRESS = (1 << 1),
+};
 
-int verify_commit_graph(struct commit_graph *g, int flags);
+int commit_graph_verify(struct commit_graph *g,
+			enum commit_graph_verify_flags flags);
 
-void close_commit_graph(struct object_database *);
-void free_commit_graph(struct commit_graph *);
+void commit_graph_close(struct object_database *);
+void commit_graph_free(struct commit_graph *);
 
 /*
  * Disable further use of the commit graph in this process when parsing a

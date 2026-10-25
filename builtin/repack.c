@@ -2,6 +2,7 @@
 
 #include "builtin.h"
 #include "config.h"
+#include "dir.h"
 #include "environment.h"
 #include "parse-options.h"
 #include "path.h"
@@ -351,10 +352,9 @@ int cmd_repack(int argc,
 		/*
 		 * Dropping objects means rebuilding the promisor packs
 		 * without them and then removing the old packs, so the
-		 * redundant packs must be deleted. Imply -d on a real run.
+		 * redundant packs must be deleted. Imply -d.
 		 */
-		if (!dry_run)
-			delete_redundant = 1;
+		delete_redundant = 1;
 
 		ret = enumerate_promisor_blobs(repo, &po_args.filter_options, &drop_oids);
 
@@ -391,6 +391,13 @@ int cmd_repack(int argc,
 			oidset_iter_init(&drop_oids, &iter);
 			while ((oid = oidset_iter_next(&iter)))
 				printf("%s\n", oid_to_hex(oid));
+
+			/*
+			 * Only list the candidates to be dropped; skip
+			 * the actual repack
+			 */
+			ret = 0;
+			goto cleanup;
 		}
 	}
 
@@ -455,6 +462,8 @@ int cmd_repack(int argc,
 	packtmp = mkpathdup("%s/%s", packdir, packtmp_name);
 
 	existing.repo = repo;
+	keep_pack_list.cmp = fspathcmp;
+	string_list_sort(&keep_pack_list);
 	existing_packs_collect(&existing, &keep_pack_list);
 
 	if (geometry.split_factor) {
@@ -473,9 +482,11 @@ int cmd_repack(int argc,
 	show_progress = !po_args.quiet && isatty(2);
 
 	strvec_push(&cmd.args, "--keep-true-parents");
-	for (i = 0; i < keep_pack_list.nr; i++)
-		strvec_pushf(&cmd.args, "--keep-pack=%s",
-			     keep_pack_list.items[i].string);
+	/* Geometric follow walks exclude these packs through stdin instead. */
+	if (!(geometry.split_factor && !midx_must_contain_cruft))
+		for (i = 0; i < keep_pack_list.nr; i++)
+			strvec_pushf(&cmd.args, "--keep-pack=%s",
+				     keep_pack_list.items[i].string);
 	strvec_push(&cmd.args, "--non-empty");
 	if (!geometry.split_factor) {
 		/*
@@ -505,7 +516,7 @@ int cmd_repack(int argc,
 
 	if (pack_everything & ALL_INTO_ONE) {
 		repack_promisor_objects(repo, &po_args, &names, packtmp,
-			(drop_filtered && !dry_run) ? &drop_oids : NULL);
+			drop_filtered ? &drop_oids : NULL);
 
 		if (existing_packs_has_non_kept(&existing) &&
 		    delete_redundant &&
@@ -539,6 +550,12 @@ int cmd_repack(int argc,
 			strvec_push(&cmd.args, "--stdin-packs=follow");
 		strvec_push(&cmd.args, "--unpacked");
 	} else {
+		/*
+		 * Incremental repacks do not copy already-packed objects,
+		 * so cruft packs may be required to form a reachability
+		 * closure for the MIDX.
+		 */
+		midx_must_contain_cruft = 1;
 		strvec_push(&cmd.args, "--unpacked");
 		strvec_push(&cmd.args, "--incremental");
 	}
@@ -584,6 +601,29 @@ int cmd_repack(int argc,
 
 			fprintf(in, "%c%s\n", marker, basename);
 		}
+		if (!midx_must_contain_cruft) {
+			struct strbuf buf = STRBUF_INIT;
+
+			for_each_string_list_item(item, &existing.kept_packs) {
+				char marker = '^';
+
+				strbuf_reset(&buf);
+				strbuf_addf(&buf, "%s.pack", item->string);
+
+				if (po_args.pack_kept_objects &&
+				    !string_list_has_string(&keep_pack_list,
+							    buf.buf))
+					continue;
+
+				/* Exclusions override any inclusion above. */
+				if (!string_list_has_string(&existing.midx_packs,
+							    buf.buf))
+					marker = '!';
+
+				fprintf(in, "%c%s\n", marker, buf.buf);
+			}
+			strbuf_release(&buf);
+		}
 		fclose(in);
 	}
 
@@ -617,7 +657,7 @@ int cmd_repack(int argc,
 		 * midx_has_unknown_packs() will make the decision for
 		 * us.
 		 */
-		if (!get_multi_pack_index(files->packed))
+		if (!get_multi_pack_index(files->dirs->packed))
 			midx_must_contain_cruft = 1;
 	}
 
@@ -757,7 +797,7 @@ int cmd_repack(int argc,
 						       wrote_incremental_midx);
 		if (show_progress)
 			opts |= PRUNE_PACKED_VERBOSE;
-		prune_packed_objects(opts);
+		prune_packed_objects(repo, opts);
 
 		if (!keep_unreachable &&
 		    (!(pack_everything & LOOSEN_UNREACHABLE) ||
@@ -775,7 +815,7 @@ int cmd_repack(int argc,
 
 		if (git_env_bool(GIT_TEST_MULTI_PACK_INDEX_WRITE_INCREMENTAL, 0))
 			flags |= MIDX_WRITE_INCREMENTAL;
-		write_midx_file(files->packed, NULL, NULL, flags);
+		write_midx_file(files->dirs->packed, NULL, NULL, flags);
 	}
 
 cleanup:

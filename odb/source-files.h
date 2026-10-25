@@ -2,9 +2,38 @@
 #define ODB_SOURCE_FILES_H
 
 #include "odb/source.h"
+#include "statinfo.h"
+#include "strmap.h"
 
 struct odb_source_loose;
 struct odb_source_packed;
+
+/*
+ * A single object directory that encapsulates access to both the loose and
+ * packed backend. This can either be the primary or an alternate object
+ * directory.
+ */
+struct odb_files_dir {
+	/* Absolute path to the object directory. */
+	char *abspath;
+
+	/* List of alternate object directories. */
+	struct odb_files_dir *next;
+
+	/* The two sources derived from this object directory. */
+	struct odb_source_loose *loose;
+	struct odb_source_packed *packed;
+
+	/*
+	 * Whether this is the local object directory of the owning
+	 * repository. Directories added via alternates are not local.
+	 */
+	bool local;
+};
+
+struct odb_files_dir *odb_files_dir_new(struct object_database *odb,
+					const char *path, bool local);
+void odb_files_dir_free(struct odb_files_dir *dir);
 
 /*
  * The files object database source uses a combination of loose objects and
@@ -12,14 +41,36 @@ struct odb_source_packed;
  */
 struct odb_source_files {
 	struct odb_source base;
-	struct odb_source_loose *loose;
-	struct odb_source_packed *packed;
+
+	/*
+	 * List of all object directories; the main directory is first (and
+	 * cannot be NULL after initialization). Subsequent directories are
+	 * alternates.
+	 */
+	struct odb_files_dir *dirs;
+	struct odb_files_dir **dirs_tail;
+
+	/*
+	 * Set of directory paths that have already been linked into this
+	 * source. This set is used to detect the case where the same directory
+	 * is registered multiple times.
+	 */
+	struct strset dir_paths;
+
+	/*
+	 * Whether directory paths shall be compared case-insensitively, as
+	 * determined by "core.ignoreCase".
+	 */
+	int dir_paths_icase;
+
+	/* Stat data of the "info/alternates" file. */
+	struct stat_validity alternates_validity;
 };
 
 /* Allocate and initialize a new object source. */
 struct odb_source_files *odb_source_files_new(struct object_database *odb,
-					      const char *path,
-					      bool local);
+					      const char *payload,
+					      enum odb_new_flags flags);
 
 /*
  * Optimize the files object database source by repacking loose objects and
@@ -48,5 +99,11 @@ static inline struct odb_source_files *odb_source_files_downcast(struct odb_sour
 		    odb_source_type_to_name(ODB_SOURCE_FILES));
 	return container_of(source, struct odb_source_files, base);
 }
+
+/*
+ * Find "files" directory by its object directory path. Returns a `NULL`
+ * pointer in case the object directory could not be found.
+ */
+struct odb_files_dir *odb_source_files_find_dir(struct object_database *odb, const char *obj_dir);
 
 #endif

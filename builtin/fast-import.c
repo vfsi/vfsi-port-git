@@ -292,6 +292,9 @@ static void fast_import_state_init(struct fast_import_state *state,
 	state->option = option;
 }
 
+static struct object_entry *dereference(struct object_entry *oe,
+					struct object_id *oid);
+
 static void parse_argv(struct fast_import_state *state);
 static void parse_get_mark(struct fast_import_state *state, const char *p);
 static void parse_cat_blob(struct fast_import_state *state, const char *p);
@@ -895,7 +898,7 @@ static void end_packfile(void)
 	running = 1;
 	clear_delta_base_cache();
 	if (object_count) {
-		struct odb_source_files *files = odb_source_files_downcast(pack_data->repo->objects->sources);
+		struct odb_source_files *files = odb_source_files_downcast(pack_data->repo->objects->source);
 		struct packed_git *new_p;
 		struct object_id cur_pack_oid;
 		char *idx_name;
@@ -921,7 +924,7 @@ static void end_packfile(void)
 		idx_name = keep_pack(create_index());
 
 		/* Register the packfile with core git's machinery. */
-		new_p = packfile_store_load_pack(files->packed, idx_name, 1);
+		new_p = packfile_store_load_pack(files->dirs->packed, idx_name, 1);
 		if (!new_p)
 			die(_("core Git rejected index %s"), idx_name);
 		all_packs[pack_id] = new_p;
@@ -975,7 +978,7 @@ static int store_object(
 	struct object_id *oidout,
 	uintmax_t mark)
 {
-	struct odb_source *source;
+	struct odb_source_files *files = odb_source_files_downcast(the_repository->objects->source);
 	void *out, *delta;
 	struct object_entry *e;
 	unsigned char hdr[96];
@@ -1002,10 +1005,8 @@ static int store_object(
 		return 1;
 	}
 
-	for (source = the_repository->objects->sources; source; source = source->next) {
-		struct odb_source_files *files = odb_source_files_downcast(source);
-
-		if (!packfile_list_find_oid(packfile_store_get_packs(files->packed), &oid))
+	for (struct odb_files_dir *dir = files->dirs; dir; dir = dir->next) {
+		if (!packfile_list_find_oid(packfile_store_get_packs(dir->packed), &oid))
 			continue;
 		e->type = type;
 		e->pack_id = MAX_PACK_ID;
@@ -1125,10 +1126,10 @@ static void truncate_pack(struct hashfile_checkpoint *checkpoint)
 
 static void stream_blob(uintmax_t len, struct object_id *oidout, uintmax_t mark)
 {
+	struct odb_source_files *files = odb_source_files_downcast(the_repository->objects->source);
 	size_t in_sz = 64 * 1024, out_sz = 64 * 1024;
 	unsigned char *in_buf = xmalloc(in_sz);
 	unsigned char *out_buf = xmalloc(out_sz);
-	struct odb_source *source;
 	struct object_entry *e;
 	struct object_id oid;
 	unsigned long hdrlen;
@@ -1212,10 +1213,8 @@ static void stream_blob(uintmax_t len, struct object_id *oidout, uintmax_t mark)
 		goto out;
 	}
 
-	for (source = the_repository->objects->sources; source; source = source->next) {
-		struct odb_source_files *files = odb_source_files_downcast(source);
-
-		if (!packfile_list_find_oid(packfile_store_get_packs(files->packed), &oid))
+	for (struct odb_files_dir *dir = files->dirs; dir; dir = dir->next) {
+		if (!packfile_list_find_oid(packfile_store_get_packs(dir->packed), &oid))
 			continue;
 		e->type = OBJ_BLOB;
 		e->pack_id = MAX_PACK_ID;
@@ -2658,12 +2657,20 @@ static void parse_from_existing(struct branch *b)
 		oidclr(&b->branch_tree.versions[1].oid, the_repository->hash_algo);
 	} else {
 		unsigned long size;
-		size_t size_st = 0;
 		char *buf;
+		struct object_entry *e = find_object(&b->oid);
 
-		buf = odb_read_object_peeled(the_repository->objects, &b->oid,
-					     OBJ_COMMIT, &size_st, &b->oid);
-		size = cast_size_t_to_ulong(size_st);
+		while (e && e->type == OBJ_TAG)
+			e = dereference(e, &b->oid);
+
+		if (e && e->type == OBJ_COMMIT && e->pack_id != MAX_PACK_ID) {
+			buf = gfi_unpack_entry(e, &size);
+		} else {
+			size_t size_st = 0;
+			buf = odb_read_object_peeled(the_repository->objects, &b->oid,
+						     OBJ_COMMIT, &size_st, &b->oid);
+			size = cast_size_t_to_ulong(size_st);
+		}
 		parse_from_commit(b, buf, size);
 		free(buf);
 	}
@@ -3851,6 +3858,14 @@ static void option_quiet(void)
 	quiet = 1;
 }
 
+static void check_unsafe_option(struct fast_import_state *state,
+				const char *option)
+{
+	if (!state->allow_unsafe_features)
+		die(_("option '%s' forbidden in input without --allow-unsafe-features"),
+		    option);
+}
+
 static int parse_one_option(struct fast_import_state *state, const char *option)
 {
 	if (skip_prefix(option, "max-pack-size=", &option)) {
@@ -3862,6 +3877,7 @@ static int parse_one_option(struct fast_import_state *state, const char *option)
 	} else if (skip_prefix(option, "active-branches=", &option)) {
 		option_active_branches(option);
 	} else if (skip_prefix(option, "export-pack-edges=", &option)) {
+		check_unsafe_option(state, "export-pack-edges");
 		option_export_pack_edges(state, option);
 	} else if (skip_prefix(option, "signed-commits=", &option)) {
 		option_signed_commits(option);
@@ -3907,8 +3923,10 @@ static int parse_one_feature(struct fast_import_state *state,
 	} else if (!strcmp(feature, "alias")) {
 		; /* Don't die - this feature is supported */
 	} else if (skip_prefix(feature, "rewrite-submodules-to=", &arg)) {
+		check_unsafe_feature(state, "rewrite-submodules-to");
 		option_rewrite_submodules(state, arg, &sub_marks_to);
 	} else if (skip_prefix(feature, "rewrite-submodules-from=", &arg)) {
+		check_unsafe_feature(state, "rewrite-submodules-from");
 		option_rewrite_submodules(state, arg, &sub_marks_from);
 	} else if (!strcmp(feature, "get-mark")) {
 		; /* Don't die - this feature is supported */
@@ -4120,6 +4138,18 @@ static int option_parse_quiet(const struct option *opt UNUSED,
 	return 0;
 }
 
+static int option_parse_early_allow_unsafe(const struct option *option,
+					   const char *value UNUSED,
+					   bool unset, int pos UNUSED,
+					   void *data)
+{
+	struct fast_import_state *state = data;
+
+	if (!strcmp(option->long_name, "allow-unsafe-features"))
+		state->allow_unsafe_features = !unset;
+	return 0;
+}
+
 int cmd_fast_import(int argc,
 		    const char **argv,
 		    const char *prefix,
@@ -4184,7 +4214,7 @@ int cmd_fast_import(int argc,
 		OPT_HIDDEN_GROUP(N_("Advanced")),
 		OPT_BOOL_F(0, "allow-unsafe-features", &state.allow_unsafe_features,
 			   N_("allow unsafe mark commands from the stream"),
-			   PARSE_OPT_HIDDEN | PARSE_OPT_NONEG),
+			   PARSE_OPT_HIDDEN | PARSE_OPT_NONEG | PARSE_OPT_EARLY),
 		OPT_CALLBACK_F(0, "export-pack-edges", &state, N_("file"),
 			       N_("dump edge commits to <file>"),
 			       PARSE_OPT_HIDDEN | PARSE_OPT_NONEG,
@@ -4218,23 +4248,19 @@ int cmd_fast_import(int argc,
 	 * line to override stream data). But we must do an early parse of any
 	 * command-line options that impact how we interpret the feature lines.
 	 *
-	 * NEEDSWORK: This scan only matches the exact "--allow-unsafe-features"
-	 * spelling and stops at the first argument that doesn't start with a
-	 * dash. As parse_options() below also accepts unambiguous abbreviations
-	 * and values separated by a space from their option, the two disagree
-	 * for command lines like "--allow-unsafe" or "--depth 5
-	 * --allow-unsafe-features": parse_options() accepts the option, but
-	 * this scan doesn't see it, so unsafe features from the stream are
-	 * still refused. This errs on the safe side, but should be fixed by
-	 * teaching this scan about the options that take a value.
+	 * The scan uses the same options as parse_options() below, so the
+	 * two agree on which options take a value and on abbreviations. In
+	 * case of doubt, the scan stops early, so unsafe features are then
+	 * refused rather than wrongly allowed.
+	 *
+	 * EARLY_SCAN_STOP_AT_NON_OPTION is passed even though parse_options()
+	 * is not called with PARSE_OPT_STOP_AT_NON_OPTION, as any non-option
+	 * argument makes parse_argv() reject the command line, and the stream
+	 * should not have been processed with unsafe features by then.
 	 */
-	for (int i = 1; i < argc; i++) {
-		const char *arg = argv[i];
-		if (*arg != '-' || !strcmp(arg, "--"))
-			break;
-		if (!strcmp(arg, "--allow-unsafe-features"))
-			state.allow_unsafe_features = 1;
-	}
+	early_scan_options(argc - 1, argv + 1, fast_import_options,
+			   EARLY_SCAN_STOP_AT_NON_OPTION,
+			   option_parse_early_allow_unsafe, &state);
 
 	rc_free = mem_pool_alloc(&fi_mem_pool, cmd_save * sizeof(*rc_free));
 	for (unsigned int i = 0; i < (cmd_save - 1); i++)

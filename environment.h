@@ -45,6 +45,7 @@
 #define GIT_ATTR_SOURCE_ENVIRONMENT "GIT_ATTR_SOURCE"
 #define GIT_REFERENCE_BACKEND_ENVIRONMENT "GIT_REFERENCE_BACKEND"
 #define GIT_REF_STORAGE_FORMAT_ENVIRONMENT "GIT_REF_STORAGE_FORMAT"
+#define GIT_OBJECT_STORAGE_FORMAT_ENVIRONMENT "GIT_OBJECT_STORAGE_FORMAT"
 
 /*
  * Environment variable used to propagate the --no-advice global option to the
@@ -52,6 +53,14 @@
  * This is an internal variable that should not be set by the user.
  */
 #define GIT_ADVICE_ENVIRONMENT "GIT_ADVICE"
+
+/*
+ * Environment variable used to detect that a lazy fetch is already in
+ * progress in a parent process, to prevent infinite recursion when a
+ * promisor remote resolves back to the repository being served.
+ * This is an internal variable that should not be set by the user.
+ */
+#define LAZY_FETCH_DEPTH_ENVIRONMENT "GIT_INTERNAL_LAZY_FETCH_DEPTH"
 
 /*
  * Environment variable used in handshaking the wire protocol.
@@ -115,6 +124,13 @@ enum object_creation_mode {
 	OBJECT_CREATION_USES_RENAMES = 1
 };
 
+/*
+ * See https://lore.kernel.org/git/anlmwaEtwcCPse1N@pks.im/ and later
+ * discussions.  Until we figure out what to do with this and
+ * repo_settings, and allow them to be truly usable on a repository
+ * instance that is not the_repository, do *NOT* add any new members
+ * to this structure.
+ */
 struct repo_config_values {
 	/* section "core" config values */
 	char *attributes_file;
@@ -141,6 +157,7 @@ struct repo_config_values {
 	int trust_executable_bit;
 	int has_symlinks;
 	int use_nanosec;
+	unsigned int max_ce_namelen;
 
 	/* section "sparse" config values */
 	int sparse_expect_files_outside_of_patterns;

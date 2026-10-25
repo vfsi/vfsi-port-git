@@ -412,13 +412,13 @@ static unsigned long do_compress(void **pptr, unsigned long size)
 	return stream.total_out;
 }
 
-static unsigned long write_large_blob_data(struct odb_stream *st, struct hashfile *f,
-					   const struct object_id *oid)
+static off_t write_large_blob_data(struct odb_stream *st, struct hashfile *f,
+				   const struct object_id *oid)
 {
 	git_zstream stream;
 	unsigned char ibuf[1024 * 16];
 	unsigned char obuf[1024 * 16];
-	unsigned long olen = 0;
+	off_t olen = 0;
 	struct repo_config_values *cfg = repo_config_values(the_repository);
 
 	git_deflate_init(&stream, cfg->pack_compression_level);
@@ -513,10 +513,11 @@ static inline int oe_size_greater_than(struct packing_data *pack,
 }
 
 /* Return 0 if we will bust the pack-size limit */
-static unsigned long write_no_reuse_object(struct hashfile *f, struct object_entry *entry,
-					   unsigned long limit, int usable_delta)
+static off_t write_no_reuse_object(struct hashfile *f, struct object_entry *entry,
+				   unsigned long limit, int usable_delta)
 {
-	unsigned long size, datalen;
+	size_t size;
+	off_t datalen;
 	unsigned char header[MAX_PACK_OBJECT_HEADER],
 		      dheader[MAX_PACK_OBJECT_HEADER];
 	unsigned hdrlen;
@@ -1566,11 +1567,10 @@ static int want_cruft_object_mtime(struct repository *r,
 				   const struct object_id *oid,
 				   unsigned flags, uint32_t mtime)
 {
-	struct odb_source *source;
+	struct odb_source_files *files = odb_source_files_downcast(r->objects->source);
 
-	for (source = r->objects->sources; source; source = source->next) {
-		struct odb_source_files *files = odb_source_files_downcast(source);
-		struct packed_git **cache = packfile_store_get_kept_pack_cache(files->packed, flags);
+	for (struct odb_files_dir *dir = files->dirs; dir; dir = dir->next) {
+		struct packed_git **cache = packfile_store_get_kept_pack_cache(dir->packed, flags);
 
 		for (; *cache; cache++) {
 			struct packed_git *p = *cache;
@@ -1753,21 +1753,19 @@ static int want_object_in_pack_mtime(const struct object_id *oid,
 				     off_t *found_offset,
 				     uint32_t found_mtime)
 {
+	struct odb_source_files *files =
+		odb_source_files_downcast(the_repository->objects->source);
 	int want;
 	struct packfile_list_entry *e;
-	struct odb_source *source;
 
 	if (!exclude && local) {
 		/*
-		 * Note that we start iterating at `sources->next` so that we
-		 * skip the local object source.
+		 * Note that we start iterating at `dirs->next` so that we
+		 * skip the local object directory.
 		 */
-		struct odb_source *source = the_repository->objects->sources->next;
-		for (; source; source = source->next) {
-			struct odb_source_files *files = odb_source_files_downcast(source);
-			if (!odb_source_read_object_info(&files->loose->base, oid, NULL, 0, NULL))
+		for (struct odb_files_dir *dir = files->dirs->next; dir; dir = dir->next)
+			if (!odb_source_read_object_info(&dir->loose->base, oid, NULL, 0, NULL))
 				return 0;
-		}
 	}
 
 	/*
@@ -1785,9 +1783,8 @@ static int want_object_in_pack_mtime(const struct object_id *oid,
 		*found_offset = 0;
 	}
 
-	for (source = the_repository->objects->sources; source; source = source->next) {
-		struct odb_source_files *files = odb_source_files_downcast(source);
-		struct multi_pack_index *m = get_multi_pack_index(files->packed);
+	for (struct odb_files_dir *dir = files->dirs; dir; dir = dir->next) {
+		struct multi_pack_index *m = get_multi_pack_index(dir->packed);
 		struct pack_entry e;
 
 		if (m && midx_fill_entry(m, oid, &e, NULL) == MIDX_FILL_HIT) {
@@ -1797,14 +1794,12 @@ static int want_object_in_pack_mtime(const struct object_id *oid,
 		}
 	}
 
-	for (source = the_repository->objects->sources; source; source = source->next) {
-		struct odb_source_files *files = odb_source_files_downcast(source);
-
-		for (e = files->packed->packs.head; e; e = e->next) {
+	for (struct odb_files_dir *dir = files->dirs; dir; dir = dir->next) {
+		for (e = dir->packed->packs.head; e; e = e->next) {
 			struct packed_git *p = e->pack;
 			want = want_object_in_pack_one(p, oid, exclude, found_pack, found_offset, found_mtime);
 			if (!exclude && want > 0)
-				packfile_list_prepend(&files->packed->packs, p);
+				packfile_list_prepend(&dir->packed->packs, p);
 			if (want != -1)
 				return want;
 		}
@@ -3804,11 +3799,18 @@ static int git_pack_config(const char *k, const char *v,
 static int stdin_packs_found_nr;
 static int stdin_packs_hints_nr;
 
+struct stdin_packs_context {
+	struct rev_info *revs; /* must be non-NULL */
+	enum stdin_packs_mode mode;
+	struct oidset extra_roots;
+};
+
 static int add_object_entry_from_pack(const struct object_id *oid,
 				      struct packed_git *p,
 				      uint32_t pos,
 				      void *_data)
 {
+	struct stdin_packs_context *ctx = _data;
 	off_t ofs;
 	struct object_info oi = OBJECT_INFO_INIT;
 	enum object_type type = OBJ_NONE;
@@ -3827,7 +3829,6 @@ static int add_object_entry_from_pack(const struct object_id *oid,
 		die(_("could not get type of object %s in pack %s"),
 		    oid_to_hex(oid), p->pack_name);
 	} else if (type == OBJ_COMMIT) {
-		struct rev_info *revs = _data;
 		/*
 		 * commits in included packs are used as starting points
 		 * for the subsequent revision walk
@@ -3840,7 +3841,10 @@ static int add_object_entry_from_pack(const struct object_id *oid,
 		 * However, we'll only add those objects to the packing
 		 * list after checking `want_object_in_pack()` below.
 		 */
-		add_pending_oid(revs, NULL, oid, 0);
+		add_pending_oid(ctx->revs, NULL, oid, 0);
+	} else if (ctx->mode == STDIN_PACKS_MODE_FOLLOW &&
+		   (type == OBJ_TREE || type == OBJ_TAG)) {
+		oidset_insert(&ctx->extra_roots, oid);
 	}
 
 	if (!want_object_in_pack(oid, 0, &p, &ofs))
@@ -3954,8 +3958,9 @@ static int stdin_packs_include_check(struct commit *commit, void *data)
 }
 
 static void stdin_packs_add_pack_entries(struct strmap *packs,
-					 struct rev_info *revs)
+					 struct stdin_packs_context *ctx)
 {
+	struct rev_info *revs = ctx->revs;
 	struct string_list keys = STRING_LIST_INIT_NODUP;
 	struct string_list_item *item;
 	struct hashmap_iter iter;
@@ -3994,15 +3999,14 @@ static void stdin_packs_add_pack_entries(struct strmap *packs,
 		    (info->kind & STDIN_PACK_EXCLUDE_OPEN))
 			for_each_object_in_pack(info->p,
 						add_object_entry_from_pack,
-						revs,
+						ctx,
 						ODB_FOR_EACH_OBJECT_PACK_ORDER);
 	}
 
 	string_list_clear(&keys, 0);
 }
 
-static void stdin_packs_read_input(struct rev_info *revs,
-				   enum stdin_packs_mode mode)
+static void stdin_packs_read_input(struct stdin_packs_context *ctx)
 {
 	struct strbuf buf = STRBUF_INIT;
 	struct strmap packs = STRMAP_INIT;
@@ -4017,7 +4021,7 @@ static void stdin_packs_read_input(struct rev_info *revs,
 			continue;
 		else if (*key == '^')
 			kind = STDIN_PACK_EXCLUDE_CLOSED;
-		else if (*key == '!' && mode == STDIN_PACKS_MODE_FOLLOW)
+		else if (*key == '!' && ctx->mode == STDIN_PACKS_MODE_FOLLOW)
 			kind = STDIN_PACK_EXCLUDE_OPEN;
 
 		if (kind != STDIN_PACK_INCLUDE)
@@ -4082,19 +4086,26 @@ static void stdin_packs_read_input(struct rev_info *revs,
 		info->p = p;
 	}
 
-	stdin_packs_add_pack_entries(&packs, revs);
+	stdin_packs_add_pack_entries(&packs, ctx);
 
 	strbuf_release(&buf);
 	strmap_clear(&packs, 1);
 }
 
-static void add_unreachable_loose_objects(struct rev_info *revs);
+static void add_unreachable_loose_objects(struct stdin_packs_context *ctx);
 
 static void read_stdin_packs(struct repository *repo,
 			     enum stdin_packs_mode mode, int rev_list_unpacked)
 {
 	int prev_fetch_if_missing = repo->fetch_if_missing;
 	struct rev_info revs;
+	struct stdin_packs_context ctx = {
+		.revs = &revs,
+		.mode = mode,
+		.extra_roots = OIDSET_INIT,
+	};
+	struct oidset_iter iter;
+	const struct object_id *oid;
 
 	/*
 	 * The revision walk may hit objects that are promised, only. As the
@@ -4131,9 +4142,9 @@ static void read_stdin_packs(struct repository *repo,
 		 */
 		ignore_packed_keep_in_core_open = 1;
 	}
-	stdin_packs_read_input(&revs, mode);
+	stdin_packs_read_input(&ctx);
 	if (rev_list_unpacked)
-		add_unreachable_loose_objects(&revs);
+		add_unreachable_loose_objects(&ctx);
 
 	if (prepare_revision_walk(&revs))
 		die(_("revision walk setup failed"));
@@ -4141,6 +4152,34 @@ static void read_stdin_packs(struct repository *repo,
 			     show_commit_pack_hint,
 			     show_object_pack_hint,
 			     &mode);
+
+	/*
+	 * Trees and tags need closure even when no commit reaches them.
+	 * Defer adding these roots to revs.pending until the first walk
+	 * finishes. Otherwise a subtree may be visited and marked SEEN
+	 * before its commit's root tree, using "a" instead of "sub/a"
+	 * for a blob's namehash and delta attributes.
+	 *
+	 * Tags may introduce more commits in the second walk, so this
+	 * does not *always* guarantee that trees are always visited
+	 * with their full paths.
+	 */
+	oidset_iter_init(&ctx.extra_roots, &iter);
+	while ((oid = oidset_iter_next(&iter))) {
+		struct object *obj = lookup_object(repo, oid);
+
+		if (!obj || !(obj->flags & SEEN))
+			add_pending_oid(&revs, NULL, oid, 0);
+	}
+	if (revs.pending.nr) {
+		if (prepare_revision_walk(&revs))
+			die(_("revision walk setup failed"));
+		traverse_commit_list(&revs,
+				     show_commit_pack_hint,
+				     show_object_pack_hint,
+				     &mode);
+	}
+	oidset_clear(&ctx.extra_roots);
 
 	release_revisions(&revs);
 
@@ -4170,14 +4209,13 @@ static void add_cruft_object_entry(const struct object_id *oid, enum object_type
 		if (!want_object_in_pack_mtime(oid, 0, &pack, &offset, mtime))
 			return;
 		if (!pack && type == OBJ_BLOB) {
-			struct odb_source *source = the_repository->objects->sources;
+			struct odb_source_files *files =
+				odb_source_files_downcast(the_repository->objects->source);
 			int found = 0;
 
-			for (; !found && source; source = source->next) {
-				struct odb_source_files *files = odb_source_files_downcast(source);
-				if (!odb_source_read_object_info(&files->loose->base, oid, NULL, 0, NULL))
+			for (struct odb_files_dir *dir = files->dirs; !found && dir; dir = dir->next)
+				if (!odb_source_read_object_info(&dir->loose->base, oid, NULL, 0, NULL))
 					found = 1;
-			}
 
 			/*
 			 * If a traversed tree has a missing blob then we want
@@ -4512,7 +4550,8 @@ static int add_object_in_unpacked_pack(const struct object_id *oid,
 
 static void add_objects_in_unpacked_packs(void)
 {
-	struct odb_source *source;
+	struct odb_source_files *files =
+		odb_source_files_downcast(to_pack.repo->objects->source);
 	time_t mtime;
 	struct odb_for_each_object_options opts = {
 		.flags = ODB_FOR_EACH_OBJECT_PACK_ORDER |
@@ -4526,13 +4565,11 @@ static void add_objects_in_unpacked_packs(void)
 		.source_infop = &source_info,
 	};
 
-	for (source = to_pack.repo->objects->sources; source; source = source->next) {
-		struct odb_source_files *files = odb_source_files_downcast(source);
-
-		if (!source->local)
+	for (struct odb_files_dir *dir = files->dirs; dir; dir = dir->next) {
+		if (!dir->local)
 			continue;
 
-		if (odb_source_for_each_object(&files->packed->base, &oi,
+		if (odb_source_for_each_object(&dir->packed->base, &oi,
 					       add_object_in_unpacked_pack, NULL, &opts))
 			die(_("cannot open pack index"));
 	}
@@ -4541,7 +4578,7 @@ static void add_objects_in_unpacked_packs(void)
 static int add_loose_object(const struct object_id *oid, const char *path,
 			    void *data)
 {
-	struct rev_info *revs = data;
+	struct stdin_packs_context *ctx = data;
 	enum object_type type = odb_read_object_info(the_repository->objects, oid, NULL);
 
 	if (type < 0) {
@@ -4563,8 +4600,14 @@ static int add_loose_object(const struct object_id *oid, const char *path,
 		add_object_entry(oid, type, "", 0);
 	}
 
-	if (revs && type == OBJ_COMMIT)
-		add_pending_oid(revs, NULL, oid, 0);
+	if (!ctx)
+		return 0;
+
+	if (type == OBJ_COMMIT)
+		add_pending_oid(ctx->revs, NULL, oid, 0);
+	else if (ctx->mode == STDIN_PACKS_MODE_FOLLOW &&
+		 (type == OBJ_TREE || type == OBJ_TAG))
+		oidset_insert(&ctx->extra_roots, oid);
 
 	return 0;
 }
@@ -4574,10 +4617,10 @@ static int add_loose_object(const struct object_id *oid, const char *path,
  * add_object_entry will weed out duplicates, so we just add every
  * loose object we find.
  */
-static void add_unreachable_loose_objects(struct rev_info *revs)
+static void add_unreachable_loose_objects(struct stdin_packs_context *ctx)
 {
-	for_each_loose_file_in_source(the_repository->objects->sources,
-				      add_loose_object, NULL, NULL, revs);
+	for_each_loose_file_in_source(the_repository->objects->source,
+				      add_loose_object, NULL, NULL, ctx);
 }
 
 static int has_sha1_pack_kept_or_nonlocal(const struct object_id *oid)
@@ -4640,11 +4683,9 @@ static int force_object_loose(struct odb_source *source,
 	size_t len;
 	int ret;
 
-	for (struct odb_source *s = source->odb->sources; s; s = s->next) {
-		struct odb_source_files *files = odb_source_files_downcast(s);
-		if (!odb_source_read_object_info(&files->loose->base, oid, NULL, 0, NULL))
+	for (struct odb_files_dir *dir = files->dirs; dir; dir = dir->next)
+		if (!odb_source_read_object_info(&dir->loose->base, oid, NULL, 0, NULL))
 			return 0;
-	}
 
 	oi.typep = &type;
 	oi.sizep = &len;
@@ -4664,7 +4705,7 @@ static int force_object_loose(struct odb_source *source,
 		compat_oid_p = &compat_oid;
 	}
 
-	ret = odb_source_write_object(&files->loose->base, buf, len, type, oid,
+	ret = odb_source_write_object(&files->dirs->loose->base, buf, len, type, oid,
 				      compat_oid_p, mtime, 0);
 
 out:
@@ -4691,7 +4732,7 @@ static void loosen_unused_packed_objects(void)
 			if (!packlist_find(&to_pack, &oid) &&
 			    !has_sha1_pack_kept_or_nonlocal(&oid) &&
 			    !loosened_object_can_be_discarded(&oid, p->mtime)) {
-				if (force_object_loose(the_repository->objects->sources,
+				if (force_object_loose(the_repository->objects->source,
 						       &oid, &p->mtime))
 					die(_("unable to force loose object"));
 				loosened_objects_nr++;
