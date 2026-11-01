@@ -2,7 +2,7 @@
 set -eu
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 binary="$repo/git"
-library=${VFSI_LIBRARY:?set VFSI_LIBRARY to the development adapter}
+library=${VFSI_LIBRARY:?set VFSI_LIBRARY to the VFSI adapter}
 fixture=$(mktemp -d /tmp/vfsi-git-port.XXXXXX)
 trap 'rm -rf "${fixture:?}"' EXIT HUP INT TERM
 "$binary" -C "$fixture" init -q
@@ -27,7 +27,7 @@ done
 printf '%s\n' 'Git port parity passed (zero, tiny and normal prefetch budgets).'
 
 # A loaded-but-incompatible adapter must not silently masquerade as acceleration.
-include=${VFSI_INCLUDE:-"$repo/build-vfsi-c/vfsi-c-0.3.9-vnfs-0.0.26/source/include"}
+include=${VFSI_INCLUDE:-"$repo/build-vfsi-c/vfsi-c-0.3.11-vnfs-0.0.27/source/include"}
 ${CC:-cc} -Wall -Wextra -Werror -I"$include" -I"$repo/contrib/vfsi" \
     "$repo/contrib/vfsi/test-identity.c" -o "$fixture/test-identity"
 "$fixture/test-identity"
