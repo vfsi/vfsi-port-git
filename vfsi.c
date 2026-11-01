@@ -306,7 +306,7 @@ static char *vfsi_connection_key(const char *path)
     const char *settings[] = { "VFSI_IMPL", "VFSI_HOST", "VFSI_EXPORT", "VFSI_MOUNT", "VFSI_ROOT" };
     if (stat(path, &st) || (count = getgroups(0, NULL)) < 0)
 	return NULL;
-    groups = xcalloc(count ? count : 1, sizeof(*groups));
+    CALLOC_ARRAY(groups, count ? count : 1);
     if (getgroups(count, groups) != count) { free(groups); return NULL; }
     strbuf_addf(&key, "%s:%"PRIuMAX":%"PRIuMAX":%"PRIuMAX":%"PRIuMAX, path,
 	(uintmax_t)st.st_dev, (uintmax_t)st.st_ino, (uintmax_t)geteuid(), (uintmax_t)getegid());
