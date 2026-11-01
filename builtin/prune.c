@@ -97,8 +97,8 @@ static int prune_object(const struct object_id *oid, const char *fullpath,
 	if (is_object_reachable(oid, revs))
 		return 0;
 
-	if (!vfsi_fill_stat(prune_data->source, fullpath, &st) &&
-	    lstat(fullpath, &st)) {
+	/* Expiration needs current metadata: a listing may predate a freshen. */
+	if (lstat(fullpath, &st)) {
 		/* report errors, but do not stop pruning */
 		error("Could not stat '%s'", fullpath);
 		return 0;
