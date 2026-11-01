@@ -18,7 +18,7 @@ jobs:
   test:
     # The public native dependency builds pinned ntirpc source.
     runs-on: ubuntu-26.04
-    name: VNFS 0.0.25 / VFSI C ABI v3
+    name: Published VFSI SDK / C ABI v3
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -28,13 +28,18 @@ jobs:
           sudo apt-get install -y clang cmake libclang-dev \
             libkrb5-dev liburcu-dev make pkg-config
       - name: Build VFSI from public crates
+        id: sdk
         run: contrib/vfsi/build-vfsi-c
       - name: Build Git with VFSI
+        env:
+          VFSI_INCLUDE: ${{ steps.sdk.outputs.include }}
         run: |
           make -j2 USE_VFSI=YesPlease \
-            VFSI_CFLAGS="-I$PWD/build-vfsi-c/vfsi-c-0.3.9-vnfs-0.0.25/source/include" \
+            VFSI_CFLAGS="-I$VFSI_INCLUDE" \
             NO_CURL=YesPlease NO_GETTEXT=YesPlease NO_TCLTK=YesPlease git
       - name: Smoke test the public VFSI library
+        env:
+          VFSI_LIBRARY: ${{ steps.sdk.outputs.library }}
         run: |
           fixture=$(mktemp -d)
           trap 'rm -rf "$fixture"' EXIT
@@ -45,11 +50,11 @@ jobs:
           git -C "$fixture" add input
           git -C "$fixture" commit --quiet -m smoke
           VFSI_IMPL=dummy \
-          VFSI_LIBRARY="$PWD/build-vfsi-c/vfsi-c-0.3.9-vnfs-0.0.25/target/release/libvfsi_c.so" \
           VFSI_ROOT="$fixture" \
           VFSI_MOUNT="$fixture" \
             ./git -C "$fixture" count-objects -v >/dev/null
       - name: Verify bounded prefetch and application parity
         env:
-          VFSI_LIBRARY: ${{ github.workspace }}/build-vfsi-c/vfsi-c-0.3.9-vnfs-0.0.25/target/release/libvfsi_c.so
+          VFSI_LIBRARY: ${{ steps.sdk.outputs.library }}
+          VFSI_INCLUDE: ${{ steps.sdk.outputs.include }}
         run: sh contrib/vfsi/test-port.sh

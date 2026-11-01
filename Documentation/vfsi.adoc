@@ -1,22 +1,22 @@
 VFSI integration
 ================
 
-This port targets VNFS 0.0.25 through the public `vfsi-c` 0.3.9 package and
+This port targets VNFS 0.0.27 through the public `vfsi-c` 0.3.11 package and
 VFSI C ABI v3. Fetch and build that release set from crates.io with:
 
 ------------
 contrib/vfsi/build-vfsi-c
 make USE_VFSI=YesPlease \
-    VFSI_CFLAGS="-I$PWD/build-vfsi-c/vfsi-c-0.3.9-vnfs-0.0.25/source/include" \
+    VFSI_CFLAGS="-I$PWD/build-vfsi-c/vfsi-c-0.3.11-vnfs-0.0.27/source/include" \
     NO_CURL=YesPlease NO_GETTEXT=YesPlease NO_TCLTK=YesPlease git
 ------------
 
 The helper verifies the published `vfsi-c` archive checksum, selects the
-public VNFS 0.0.25 crate, rejects Git-sourced Cargo dependencies, and builds
+public VNFS 0.0.27 crate, rejects non-registry dependencies, and builds
 the shared library at:
 
 ------------
-$PWD/build-vfsi-c/vfsi-c-0.3.9-vnfs-0.0.25/target/release/libvfsi_c.so
+$PWD/build-vfsi-c/vfsi-c-0.3.11-vnfs-0.0.27/target/release/libvfsi_c.so
 ------------
 
 At runtime, set `VFSI_IMPL` to `nfs` or `dummy` and point `VFSI_LIBRARY` at
@@ -52,7 +52,7 @@ exposed. Connections and short-lived metadata snapshots have separate lifetimes.
 Scoped object identity
 ----------------------
 
-With the development SDK's optional `vfsi_get_object_idv` export, cached stat
+With vfsi-c 0.3.11's optional `vfsi_get_object_idv` export, cached stat
 data is refreshed in bounded vectors together with a versioned identity. The
 full key includes a process-local backend namespace, both 64-bit filesystem-ID
 words, and the file number. Device IDs are assigned from complete namespace/
@@ -64,6 +64,7 @@ kernel mount/device numbers.
 
 An adapter lacking scoped identity, returning an invalid layout, or failing an
 identity batch keeps Git's ordinary stat/read fallback. ABI v3 and the existing
-`vfsi_attrs` layout are unchanged. To test these not-yet-published exports,
-build against the development SDK header with `VFSI_CFLAGS=-I/path/to/vnfs/bindings/c/include`
-and set `VFSI_INCLUDE` to that directory for `contrib/vfsi/test-port.sh`.
+`vfsi_attrs` layout are unchanged. The public-package CI uses the SDK build
+helper's emitted header/library paths. To test a development adapter instead,
+build with `VFSI_CFLAGS=-I/path/to/vnfs/bindings/c/include` and set both
+`VFSI_INCLUDE` and `VFSI_LIBRARY` for `contrib/vfsi/test-port.sh`.
