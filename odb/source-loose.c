@@ -121,7 +121,7 @@ static int read_object_info_from_path(struct odb_source_loose *loose,
 		goto out;
 	}
 
-	if (!vfsi_read_loose_object(&loose->base, path, &map, &mapsize)) {
+	if (!vfsi_read_loose_object(&loose->base, path, &map, &mapsize, &st)) {
 		fd = git_open(path);
 		if (fd < 0) {
 			if (errno == ENOENT) {
@@ -150,7 +150,6 @@ static int read_object_info_from_path(struct odb_source_loose *loose,
 		map = xmmap(NULL, mapsize, PROT_READ, MAP_PRIVATE, fd, 0);
 		close(fd);
 	} else {
-		vfsi_fill_stat(&loose->base, path, &st);
 		map_allocated = 1;
 	}
 	if (!map) {

@@ -24,8 +24,10 @@ int vfsi_for_each_loose_file(struct odb_source *source,
 			     void *data, int *result);
 
 int vfsi_fill_stat(struct odb_source *source, const char *path, struct stat *st);
+/* A hit transfers malloc ownership to the caller and optionally returns stat
+ * metadata from the same cache entry under one lock. The caller frees *buf. */
 int vfsi_read_loose_object(struct odb_source *source, const char *path,
-			   void **buf, unsigned long *size);
+			   void **buf, unsigned long *size, struct stat *st);
 void vfsi_source_close(struct odb_source *source);
 void vfsi_source_invalidate(struct odb_source *source);
 void vfsi_source_release(struct odb_source *source);
@@ -62,12 +64,13 @@ static inline int vfsi_fill_stat(struct odb_source *source, const char *path,
 
 static inline int vfsi_read_loose_object(struct odb_source *source,
 					 const char *path, void **buf,
-					 unsigned long *size)
+					 unsigned long *size, struct stat *st)
 {
 	(void)source;
 	(void)path;
 	(void)buf;
 	(void)size;
+	(void)st;
 	return 0;
 }
 

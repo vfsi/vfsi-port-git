@@ -43,3 +43,27 @@ uses Git's complete ordinary scan instead of returning truncated results.
 
 Run `VFSI_LIBRARY=/path/to/libvfsi_c.so sh contrib/vfsi/test-port.sh` to
 check count-objects and fsck parity with zero, tiny, and normal byte budgets.
+
+Set `VFSI_TRACE=1` to report successful vector listings and distinguish them
+from safe fallback. The port's parity script asserts these completion markers;
+missing libraries and incompatible adapters must fall back before results are
+exposed. Connections and short-lived metadata snapshots have separate lifetimes.
+
+Scoped object identity
+----------------------
+
+With the development SDK's optional `vfsi_get_object_idv` export, cached stat
+data is refreshed in bounded vectors together with a versioned identity. The
+full key includes a process-local backend namespace, both 64-bit filesystem-ID
+words, and the file number. Device IDs are assigned from complete namespace/
+filesystem pairs without hashing or truncation; the file number supplies
+`st_ino`. Hard-link and mount-view aliases within a shared backend namespace
+therefore compare equal, while unrelated namespaces with colliding numbers do
+not. The projected `st_dev` values are process-local cache keys, not persistent
+kernel mount/device numbers.
+
+An adapter lacking scoped identity, returning an invalid layout, or failing an
+identity batch keeps Git's ordinary stat/read fallback. ABI v3 and the existing
+`vfsi_attrs` layout are unchanged. To test these not-yet-published exports,
+build against the development SDK header with `VFSI_CFLAGS=-I/path/to/vnfs/bindings/c/include`
+and set `VFSI_INCLUDE` to that directory for `contrib/vfsi/test-port.sh`.

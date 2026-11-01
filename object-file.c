@@ -1212,11 +1212,9 @@ int read_loose_object(struct repository *repo,
 	char hdr[MAX_HEADER_LEN];
 	size_t *size = oi->sizep;
 
-	for (source = repo->objects->source; source; source = source->next)
-		if (vfsi_read_loose_object(source, path, &map, &mapsize)) {
-			map_allocated = 1;
-			break;
-		}
+	source = repo->objects->source;
+	if (vfsi_read_loose_object(source, path, &map, &mapsize, NULL))
+		map_allocated = 1;
 	if (!map) {
 		fd = git_open(path);
 		if (fd >= 0)
