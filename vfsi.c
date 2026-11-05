@@ -12,6 +12,11 @@
 #include "git-vfsi.h"
 #include <vfsi.h>
 #include <vfsi_dynamic.h>
+#if defined(__has_include)
+#if __has_include(<vfsi_posix.h>)
+#include <vfsi_posix.h>
+#endif
+#endif
 #include "contrib/vfsi/object-identity.h"
 
 #if VFSI_ABI_VERSION != 3
@@ -230,7 +235,7 @@ static void vfsi_mount_clear(struct vfsi_mount *mount)
 	memset(mount, 0, sizeof(*mount));
 }
 
-#ifdef __linux__
+#if defined(__linux__) && !defined(VFSI_MOUNT_INFO_VERSION)
 static void unescape_mount_field(char *field)
 {
 	char *src = field;
@@ -251,9 +256,29 @@ static void unescape_mount_field(char *field)
 }
 #endif
 
+#ifdef VFSI_MOUNT_INFO_VERSION
+static void collect_mount(const char *host, const char *export_root, const char *point, void *data)
+{
+	struct vfsi_mount *mount = data;
+	vfsi_mount_clear(mount);
+	mount->host = xstrdup(host);
+	mount->export_root = xstrdup(export_root);
+	mount->mountpoint = xstrdup(point);
+}
+#endif
+
 static int vfsi_mount_for(const char *path, struct vfsi_mount *result)
 {
-#ifdef __linux__
+#ifdef VFSI_MOUNT_INFO_VERSION
+	if (!vfsi_runtime.bindings.nfs_mount_info ||
+		vfsi_runtime.bindings.nfs_mount_info(path, collect_mount, result))
+		return 0;
+	if (!result->host || !result->export_root || !result->mountpoint) {
+		vfsi_mount_clear(result);
+		return 0;
+	}
+	return 1;
+#elif defined(__linux__)
 	FILE *fp;
 	char line[8192];
 	size_t best_len = 0;
@@ -555,13 +580,32 @@ static bool loose_entry_cb(size_t index, const char *dir, const char *name,
 	if (!dir || !name || !vfsi_attrs_valid(attrs))
 		return false;
 	if (!display_dir)
-		return true;
+		return false;
 	if (!strcmp(name, ".") || !strcmp(name, ".."))
 		return true;
 	display_path = xstrfmt("%s/%s", display_dir, name);
 	vfsi_object_add(walk->ctx, display_dir, display_path, dir, name, attrs);
 	return true;
 }
+
+#ifdef VFSI_LISTDIR_IDS_VERSION
+static bool loose_entry_ids_cb(size_t index, const char *dir, const char *name,
+			      const struct vfsi_attrs *attrs,
+			      const struct vfsi_object_id *id, void *userdata)
+{
+	struct vfsi_walk *walk = userdata;
+	size_t before = walk->ctx->objects_nr;
+	if (!attrs || !vfsi_attrs_valid(attrs) || !id || id->version != VFSI_OBJECT_ID_VERSION ||
+		id->struct_size < sizeof(*id) || !id->namespace_id ||
+		id->fileid != attrs->fileid)
+		return false;
+	if (!loose_entry_cb(index, dir, name, attrs, userdata))
+		return false;
+	if (walk->ctx->objects_nr > before)
+		walk->ctx->objects[before].identity = *id;
+	return true;
+}
+#endif
 
 static struct vfsi_object *vfsi_find_object(struct vfsi_source_context *ctx,
 					    const char *path)
@@ -687,6 +731,16 @@ static void vfsi_refresh_object_ids(struct vfsi_source_context *ctx)
 static int vfsi_attrs_to_stat(const struct vfsi_attrs *attrs,
 			    const struct vfsi_object_id *id, struct stat *st)
 {
+#ifdef VFSI_POSIX_FIELDS_VERSION
+	int error;
+	if (!attrs || !id || attrs->fileid != id->fileid ||
+		vfsi_attrs_stat_fields(attrs, st))
+		return 0;
+	pthread_mutex_lock(&vfsi_runtime.mutex);
+	error = vfsi_identity_stat(&vfsi_runtime.identity_map, id, st);
+	pthread_mutex_unlock(&vfsi_runtime.mutex);
+	return !error;
+#else
 	int error;
 	if (!vfsi_attrs_valid(attrs) || attrs->fileid != id->fileid ||
 	    (attrs->ftype != VFSI_NF4REG && attrs->ftype != VFSI_NF4DIR && attrs->ftype != VFSI_NF4LNK) ||
@@ -730,6 +784,7 @@ static int vfsi_attrs_to_stat(const struct vfsi_attrs *attrs,
 #endif
 #endif
 	return 1;
+#endif
 }
 
 int vfsi_fill_stat(struct odb_source *source, const char *path, struct stat *st)
@@ -808,7 +863,7 @@ static int vfsi_for_each_loose_file_locked(struct vfsi_source_context *ctx,
 	char *real_objects;
 	size_t i;
 	const char **dirs = NULL;
-	int rc;
+	int rc, listed_ids = 0;
 
 	*result = 0;
 
@@ -855,8 +910,15 @@ static int vfsi_for_each_loose_file_locked(struct vfsi_source_context *ctx,
 		walk.ordered_display_dirs = xcalloc(walk.subdirs.nr, sizeof(char *));
 		for (i = 0; i < walk.subdirs.nr; i++)
 			walk.ordered_display_dirs[i] = display_dir_for_real(&walk, dirs[i]);
-		rc = vfsi_runtime.bindings.listdirs(ctx->fs, dirs, walk.subdirs.nr,
-			&options, loose_entry_cb, &walk, results);
+#ifdef VFSI_LISTDIR_IDS_VERSION
+		if (vfsi_runtime.bindings.listdirs_with_ids) {
+			listed_ids = 1;
+			rc = vfsi_runtime.bindings.listdirs_with_ids(ctx->fs, dirs, walk.subdirs.nr,
+				&options, loose_entry_ids_cb, &walk, results);
+		} else
+#endif
+			rc = vfsi_runtime.bindings.listdirs(ctx->fs, dirs, walk.subdirs.nr,
+				&options, loose_entry_cb, &walk, results);
 		for (i = 0; !rc && i < walk.subdirs.nr; i++)
 			if (results[i].completion != 1)
 				rc = EIO;
@@ -868,12 +930,15 @@ static int vfsi_for_each_loose_file_locked(struct vfsi_source_context *ctx,
 		rc = 0;
 		goto out;
 	}
-	if (getenv("VFSI_TRACE"))
+	if (getenv("VFSI_TRACE")) {
 		fprintf(stderr, "vfsi: listdirs completed entries=%zu\n", ctx->objects_nr);
+		if (listed_ids) fprintf(stderr, "vfsi: listing identities=inline\n");
+	}
 	/* Refresh identity and stat attributes in one bounded GETATTR vector.
 	 * Older ABI-v3 adapters still enumerate, but singular stat calls fall back
 	 * rather than fabricate unscoped device/inode values. */
-	vfsi_refresh_object_ids(ctx);
+	if (!listed_ids)
+		vfsi_refresh_object_ids(ctx);
 	if (vfsi_prefetch_enabled() && (vfsi_runtime.bindings.read_paths || vfsi_runtime.bindings.read_paths_with_limit) && vfsi_prefetch_object_data(ctx)) {
 		/* Prefetch is optional; a growth race or tight budget must not turn
 		 * valid repository contents into a failed Git command. */

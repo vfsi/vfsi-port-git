@@ -33,7 +33,7 @@ ${CC:-cc} -Wall -Wextra -Werror -I"$include" -I"$repo/contrib/vfsi" \
 "$fixture/test-identity"
 ${CC:-cc} -shared -fPIC -I"$include" "$repo/contrib/vfsi/test-proxy.c" -ldl -o "$fixture/proxy.so"
 export VFSI_TEST_REAL_LIBRARY="$library"
-for fault in VFSI_TEST_BAD_ABI VFSI_TEST_PARTIAL; do
+for fault in VFSI_TEST_BAD_ABI VFSI_TEST_PARTIAL VFSI_TEST_BAD_INDEX; do
     env "$fault=1" VFSI_TRACE=1 VFSI_IMPL=dummy VFSI_LIBRARY="$fixture/proxy.so" VFSI_ROOT="$fixture" VFSI_MOUNT="$fixture" \
 	"$binary" -C "$fixture" count-objects -v >"$fixture/actual" 2>"$fixture/trace"
     diff -u "$fixture/expected" "$fixture/actual"

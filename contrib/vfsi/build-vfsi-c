@@ -20,6 +20,13 @@ for tool in cargo curl python3 sha256sum tar; do
 	fi
 done
 
+# Explicit local development SDK; default builds still verify the released archive.
+if test -n "${VFSI_SDK_SOURCE:-}"; then
+    exec python3 "$VFSI_SDK_SOURCE/build-sdk.py" \
+        --profile "${VFSI_SDK_PROFILE:-release}" --target-dir "${VFSI_SDK_TARGET:-$target_dir}" \
+        --prefix "$release_root/sdk-dev"
+fi
+
 mkdir -p "$release_root"
 if test ! -f "$archive"; then
 	curl --proto '=https' --tlsv1.2 -A "vfsi-port-git/$VFSI_C_VERSION" -fsSL \
@@ -37,6 +44,11 @@ if test ! -f "$source_dir/.git-vfsi-release"; then
 		>"$tmp_source/.git-vfsi-release"
 	rm -rf "$source_dir"
 	mv "$tmp_source" "$source_dir"
+fi
+
+if test -f "$source_dir/build-sdk.py"; then
+    exec python3 "$source_dir/build-sdk.py" --registry-only \
+        --target-dir "$target_dir" --prefix "$release_root/sdk"
 fi
 
 # Pre-1.0 patch requirements do not admit the next patch version. Retarget the
