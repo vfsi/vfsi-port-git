@@ -44,7 +44,8 @@ static bool forward_entry(size_t index, const char *dir, const char *name, const
     struct forwarding *state = opaque;
     vfsi_attrs altered = *attrs;
     if (getenv("VFSI_TEST_BAD_TIME")) altered.mtime_nsec = 1000000000;
-    return state->callback(index, dir, name, &altered, state->data);
+    return state->callback(getenv("VFSI_TEST_BAD_INDEX") ? SIZE_MAX : index,
+			   dir, name, &altered, state->data);
 }
 int vfsi_listdirs(vfsi_fs *fs,const char *const *paths,size_t count,const vfsi_listing_options *options,vfsi_indexed_listdir_cb cb,void *data,vfsi_listing_result *results) {
     RESOLVE(vfsi_listdirs);
