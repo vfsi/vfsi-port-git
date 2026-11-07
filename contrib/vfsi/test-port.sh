@@ -19,6 +19,7 @@ for budget in 0 1 67108864; do
 	VFSI_PREFETCH_OBJECTS=1 VFSI_PREFETCH_BYTES=$budget \
 	"$binary" -C "$fixture" count-objects -v > "$fixture/actual" 2>"$fixture/trace"
     grep -q "vfsi: listdirs completed" "$fixture/trace"
+    grep -q 'phase=collect application_callbacks=0' "$fixture/trace"
     diff -u "$fixture/expected" "$fixture/actual"
     VFSI_TRACE=1 VFSI_IMPL=dummy VFSI_LIBRARY="$library" VFSI_ROOT="$fixture" VFSI_MOUNT="$fixture" \
 	VFSI_PREFETCH_OBJECTS=1 VFSI_PREFETCH_BYTES=$budget \
