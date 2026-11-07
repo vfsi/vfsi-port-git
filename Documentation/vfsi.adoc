@@ -1,13 +1,13 @@
 VFSI integration
 ================
 
-This port uses the published `vfsi-c` 0.3.13 SDK and VFSI C ABI v3,
+This port uses the published `vfsi-c` 0.3.14 SDK and VFSI C ABI v3,
 including inline listing identities. Fetch and build it from crates.io with:
 
 ------------
 contrib/vfsi/build-vfsi-c
 make USE_VFSI=YesPlease \
-    VFSI_CFLAGS="-I$PWD/build-vfsi-c/vfsi-c-0.3.13/sdk/include" \
+    VFSI_CFLAGS="-I$PWD/build-vfsi-c/vfsi-c-0.3.14/sdk/include" \
     NO_CURL=YesPlease NO_GETTEXT=YesPlease NO_TCLTK=YesPlease git
 ------------
 
@@ -17,7 +17,7 @@ to its locked, registry-only SDK installer. The published manifest is unchanged;
 the shared library are installed together, with the library at:
 
 ------------
-$PWD/build-vfsi-c/vfsi-c-0.3.13/sdk/lib/libvfsi_c.so
+$PWD/build-vfsi-c/vfsi-c-0.3.14/sdk/lib/libvfsi_c.so
 ------------
 
 At runtime, set `VFSI_IMPL` to `nfs` or `dummy` and point `VFSI_LIBRARY` at
