@@ -108,8 +108,10 @@ static struct odb_source_loose *vfsi_loose_source(struct odb_source *source)
 {
 	if (!source)
 		return NULL;
-	if (source->type == ODB_SOURCE_FILES)
-		return odb_source_files_downcast(source)->loose;
+	if (source->type == ODB_SOURCE_FILES) {
+		struct odb_files_dir *dir = odb_source_files_downcast(source)->dirs;
+		return dir ? dir->loose : NULL;
+	}
 	if (source->type == ODB_SOURCE_LOOSE)
 		return odb_source_loose_downcast(source);
 	return NULL;
@@ -809,7 +811,7 @@ int vfsi_fill_stat(struct odb_source *source, const char *path, struct stat *st)
 int vfsi_read_loose_object(struct odb_source *source, const char *path,
 			   void **buf, unsigned long *size, struct stat *st)
 {
-	struct vfsi_source_context *ctx = vfsi_source_context(source, 0);
+	struct vfsi_source_context *ctx;
 	struct vfsi_object *obj;
 
 	if (source && source->type == ODB_SOURCE_FILES) {
