@@ -27,7 +27,7 @@ done
 printf '%s\n' 'Git port parity passed (zero, tiny and normal prefetch budgets).'
 
 # A loaded-but-incompatible adapter must not silently masquerade as acceleration.
-include=${VFSI_INCLUDE:-"$repo/build-vfsi-c/vfsi-c-0.3.13/sdk/include"}
+include=${VFSI_INCLUDE:-"$repo/build-vfsi-c/vfsi-c-0.3.14/sdk/include"}
 ${CC:-cc} -Wall -Wextra -Werror -I"$include" -I"$repo/contrib/vfsi" \
     "$repo/contrib/vfsi/test-identity.c" -o "$fixture/test-identity"
 "$fixture/test-identity"
