@@ -80,7 +80,10 @@ ubuntu-*|i386/debian-*|debian-*)
 	# See <https://github.com/uutils/coreutils/issues/10508>.
 	if test -x /usr/bin/gnudirname
 	then
-		ln -sfT /usr/bin/gnudirname /usr/bin/dirname
+		# CUSTOM_PATH is prepended to PATH by ci/lib.sh. Avoid replacing
+		# a system binary from the unprivileged hosted runner.
+		mkdir -p "$CUSTOM_PATH"
+		ln -sfT /usr/bin/gnudirname "$CUSTOM_PATH/dirname"
 	fi
 
 	case "$distro" in
