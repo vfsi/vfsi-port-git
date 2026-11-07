@@ -12,11 +12,7 @@
 #include "git-vfsi.h"
 #include <vfsi.h>
 #include <vfsi_dynamic.h>
-#if defined(__has_include)
-#if __has_include(<vfsi_posix.h>)
 #include <vfsi_posix.h>
-#endif
-#endif
 #include "contrib/vfsi/object-identity.h"
 
 #if VFSI_ABI_VERSION != 3
@@ -237,28 +233,6 @@ static void vfsi_mount_clear(struct vfsi_mount *mount)
 	memset(mount, 0, sizeof(*mount));
 }
 
-#if defined(__linux__) && !defined(VFSI_MOUNT_INFO_VERSION)
-static void unescape_mount_field(char *field)
-{
-	char *src = field;
-	char *dst = field;
-
-	while (*src) {
-		if (src[0] == '\\' && src[1] >= '0' && src[1] <= '7' &&
-		    src[2] >= '0' && src[2] <= '7' &&
-		    src[3] >= '0' && src[3] <= '7') {
-			*dst++ = ((src[1] - '0') << 6) |
-				 ((src[2] - '0') << 3) | (src[3] - '0');
-			src += 4;
-		} else {
-			*dst++ = *src++;
-		}
-	}
-	*dst = '\0';
-}
-#endif
-
-#ifdef VFSI_MOUNT_INFO_VERSION
 static void collect_mount(const char *host, const char *export_root, const char *point, void *data)
 {
 	struct vfsi_mount *mount = data;
@@ -267,11 +241,9 @@ static void collect_mount(const char *host, const char *export_root, const char 
 	mount->export_root = xstrdup(export_root);
 	mount->mountpoint = xstrdup(point);
 }
-#endif
 
 static int vfsi_mount_for(const char *path, struct vfsi_mount *result)
 {
-#ifdef VFSI_MOUNT_INFO_VERSION
 	if (!vfsi_runtime.bindings.nfs_mount_info ||
 		vfsi_runtime.bindings.nfs_mount_info(path, collect_mount, result))
 		return 0;
@@ -280,46 +252,6 @@ static int vfsi_mount_for(const char *path, struct vfsi_mount *result)
 		return 0;
 	}
 	return 1;
-#elif defined(__linux__)
-	FILE *fp;
-	char line[8192];
-	size_t best_len = 0;
-
-	fp = fopen("/proc/self/mounts", "r");
-	if (!fp)
-		return 0;
-	while (fgets(line, sizeof(line), fp)) {
-		char source[4096], mountpoint[4096], fstype[64];
-		char *export_sep;
-		size_t len;
-
-		if (sscanf(line, "%4095s %4095s %63s", source, mountpoint,
-			   fstype) != 3)
-			continue;
-		if (strcmp(fstype, "nfs") && strcmp(fstype, "nfs4"))
-			continue;
-		unescape_mount_field(source);
-		unescape_mount_field(mountpoint);
-		len = strlen(mountpoint);
-		if (len <= best_len || !starts_with(path, mountpoint) ||
-		    (len != 1 && path[len] != '/' && path[len] != '\0'))
-			continue;
-		export_sep = strstr(source, ":/");
-		if (!export_sep)
-			continue;
-		vfsi_mount_clear(result);
-		result->mountpoint = xstrdup(mountpoint);
-		result->host = xmemdupz(source, export_sep - source);
-		result->export_root = xstrdup(export_sep + 1);
-		best_len = len;
-	}
-	fclose(fp);
-	return result->mountpoint != NULL;
-#else
-	(void)path;
-	(void)result;
-	return 0;
-#endif
 }
 
 /* Reuse only the same source namespace, credentials, and explicit settings.
@@ -784,7 +716,6 @@ static void vfsi_refresh_object_ids(struct vfsi_source_context *ctx)
 static int vfsi_attrs_to_stat(const struct vfsi_attrs *attrs,
 			    const struct vfsi_object_id *id, struct stat *st)
 {
-#ifdef VFSI_POSIX_FIELDS_VERSION
 	int error;
 	if (!attrs || !id || attrs->fileid != id->fileid ||
 		vfsi_attrs_stat_fields(attrs, st))
@@ -793,51 +724,6 @@ static int vfsi_attrs_to_stat(const struct vfsi_attrs *attrs,
 	error = vfsi_identity_stat(&vfsi_runtime.identity_map, id, st);
 	pthread_mutex_unlock(&vfsi_runtime.mutex);
 	return !error;
-#else
-	int error;
-	if (!vfsi_attrs_valid(attrs) || attrs->fileid != id->fileid ||
-	    (attrs->ftype != VFSI_NF4REG && attrs->ftype != VFSI_NF4DIR && attrs->ftype != VFSI_NF4LNK) ||
-	    attrs->size > INT64_MAX || attrs->blocks > INT64_MAX ||
-	    attrs->atime_nsec >= 1000000000 || attrs->mtime_nsec >= 1000000000 || attrs->ctime_nsec >= 1000000000)
-		return 0;
-	memset(st, 0, sizeof(*st));
-	pthread_mutex_lock(&vfsi_runtime.mutex);
-	error = vfsi_identity_stat(&vfsi_runtime.identity_map, id, st);
-	pthread_mutex_unlock(&vfsi_runtime.mutex);
-	if (error)
-		return 0;
-	st->st_mode = attrs->mode & 07777;
-	if (attrs->ftype == VFSI_NF4DIR)
-		st->st_mode |= S_IFDIR;
-	else if (attrs->ftype == VFSI_NF4LNK)
-		st->st_mode |= S_IFLNK;
-	else
-		st->st_mode |= S_IFREG;
-	st->st_nlink = attrs->nlink;
-	st->st_uid = attrs->uid;
-	st->st_gid = attrs->gid;
-	st->st_size = attrs->size;
-	st->st_blocks = attrs->blocks;
-	st->st_atime = attrs->atime_sec;
-	st->st_mtime = attrs->mtime_sec;
-	st->st_ctime = attrs->ctime_sec;
-	if ((uint64_t)st->st_ino != attrs->fileid || (uint64_t)st->st_size != attrs->size ||
-	    (uint64_t)st->st_blocks != attrs->blocks || (int64_t)st->st_mtime != attrs->mtime_sec ||
-	    (int64_t)st->st_atime != attrs->atime_sec || (int64_t)st->st_ctime != attrs->ctime_sec)
-		return 0;
-#ifndef NO_NSEC
-#ifdef USE_ST_TIMESPEC
-	st->st_atimespec.tv_nsec = attrs->atime_nsec;
-	st->st_mtimespec.tv_nsec = attrs->mtime_nsec;
-	st->st_ctimespec.tv_nsec = attrs->ctime_nsec;
-#else
-	st->st_atim.tv_nsec = attrs->atime_nsec;
-	st->st_mtim.tv_nsec = attrs->mtime_nsec;
-	st->st_ctim.tv_nsec = attrs->ctime_nsec;
-#endif
-#endif
-	return 1;
-#endif
 }
 
 int vfsi_fill_stat(struct odb_source *source, const char *path, struct stat *st)
