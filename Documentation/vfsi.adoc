@@ -31,16 +31,22 @@ An older adapter without discovery keeps Git's ordinary filesystem path.
 Direct access does not share the kernel client's caches.
 
 Loose-object prefetch is optional (`VFSI_PREFETCH_OBJECTS=1`).
-`VFSI_PREFETCH_BYTES` bounds retained object payloads (default 64 MiB;
+`VFSI_PREFETCH_BYTES` bounds prefetched payloads across each loose-object scan (default 64 MiB;
 zero disables payload prefetch). Only regular files with valid loose-object
 names are selected. Large objects remain on Git's normal read path;
 payloads are released after consumption. Directory replay uses per-directory
 indexes rather than scanning every cached object for every directory.
 
-The loose-directory snapshot is limited to 200,000 aggregate entries. One
-additional entry is probed to distinguish overflow from a complete listing;
-overflow discards the snapshot before replaying application callbacks and
-uses Git's complete ordinary scan instead of returning truncated results.
+Loose directories are staged in numeric fanout groups of at most 24 directories,
+with a shared 200,000-entry/64 MiB path budget for each group. Each group is
+validated before callbacks and released after replay. An overflowing or failed
+group uses Git's ordinary traversal for those directories only; earlier callbacks
+are never replayed. This avoids an all-repository snapshot limit.
+
+When the library supplies both optional cursor-identity listing and cursor-free
+symbols, admitted fanout directories retain their parent identity across groups.
+Other root entries are released immediately. Older libraries retain path-based
+vector listing and ordinary-read fallbacks.
 
 Run `VFSI_LIBRARY=/path/to/libvfsi_c.so sh contrib/vfsi/test-port.sh` to
 check count-objects and fsck parity with zero, tiny, and normal byte budgets.

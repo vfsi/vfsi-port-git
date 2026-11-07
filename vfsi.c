@@ -456,6 +456,10 @@ struct vfsi_walk {
 	const char *display_root;
 	const char *real_root;
 	const char **ordered_display_dirs;
+	size_t batch_count;
+#ifdef VFSI_DIRECTORY_CURSOR_IDS_VERSION
+	struct vfsi_dir_cursor *seeds[256];
+#endif
 };
 
 static int vfsi_attrs_valid(const struct vfsi_attrs *attrs)
@@ -466,8 +470,9 @@ static int vfsi_attrs_valid(const struct vfsi_attrs *attrs)
 
 static int is_hexpair(const char *s)
 {
-	return isxdigit((unsigned char)s[0]) &&
-	       isxdigit((unsigned char)s[1]) && s[2] == '\0';
+	return s[0] && s[1] && s[2] == '\0' &&
+	       strchr("0123456789abcdef", s[0]) &&
+	       strchr("0123456789abcdef", s[1]);
 }
 
 static int cmp_subdir_ptr(const void *a, const void *b)
@@ -492,6 +497,35 @@ static bool collect_subdir_cb(const char *name, const struct vfsi_attrs *attrs,
 		     walk->display_root, name);
 	return true;
 }
+
+#ifdef VFSI_DIRECTORY_CURSOR_IDS_VERSION
+static bool collect_subdir_cursor_cb(size_t index, const char *dir, const char *name,
+				     const struct vfsi_attrs *attrs,
+				     const struct vfsi_object_id *id,
+				     struct vfsi_dir_cursor *child, void *userdata)
+{
+	struct vfsi_walk *walk = userdata;
+	size_t before = walk->subdirs.nr;
+	int ok = index == 0 && dir && id && collect_subdir_cb(name, attrs, userdata);
+	if (ok && walk->subdirs.nr > before) {
+		unsigned nr = (hexval_table[(unsigned char)name[0]] << 4) |
+			hexval_table[(unsigned char)name[1]];
+		if (walk->seeds[nr]) {
+			vfsi_runtime.bindings.dir_cursor_free(child);
+			return false;
+		}
+		walk->seeds[nr] = child;
+	} else {
+		vfsi_runtime.bindings.dir_cursor_free(child);
+	}
+	return ok;
+}
+
+static bool loose_entry_cursor_ids_cb(size_t index, const char *dir, const char *name,
+				     const struct vfsi_attrs *attrs,
+				     const struct vfsi_object_id *id,
+				     struct vfsi_dir_cursor *child, void *userdata);
+#endif
 
 static int process_loose_entry(struct vfsi_walk *walk,
 			       const char *dir, const char *name)
@@ -577,7 +611,7 @@ static bool loose_entry_cb(size_t index, const char *dir, const char *name,
 			   void *userdata)
 {
 	struct vfsi_walk *walk = userdata;
-	const char *display_dir = index < walk->subdirs.nr ? walk->ordered_display_dirs[index] : NULL;
+	const char *display_dir = index < walk->batch_count ? walk->ordered_display_dirs[index] : NULL;
 	char *display_path;
 	if (!dir || !name || !vfsi_attrs_valid(attrs))
 		return false;
@@ -606,6 +640,18 @@ static bool loose_entry_ids_cb(size_t index, const char *dir, const char *name,
 	if (walk->ctx->objects_nr > before)
 		walk->ctx->objects[before].identity = *id;
 	return true;
+}
+#endif
+
+#ifdef VFSI_DIRECTORY_CURSOR_IDS_VERSION
+static bool loose_entry_cursor_ids_cb(size_t index, const char *dir, const char *name,
+				     const struct vfsi_attrs *attrs,
+				     const struct vfsi_object_id *id,
+				     struct vfsi_dir_cursor *child, void *userdata)
+{
+	/* Loose-object scans never descend into object entries. */
+	vfsi_runtime.bindings.dir_cursor_free(child);
+	return loose_entry_ids_cb(index, dir, name, attrs, id, userdata);
 }
 #endif
 
@@ -641,16 +687,10 @@ static bool vfsi_store_read_paths_cb(const char *path,
 	return true;
 }
 
-static int vfsi_prefetch_object_data(struct vfsi_source_context *ctx)
+static int vfsi_prefetch_budget(size_t *limit)
 {
-	const char **paths;
-	size_t i;
-	size_t next = 0;
-	size_t chunk;
-	int rc = 0;
-	size_t planned = 0;
 	const char *setting = getenv("VFSI_PREFETCH_BYTES");
-	ctx->data_limit = 64 * 1024 * 1024;
+	*limit = 64 * 1024 * 1024;
 	if (setting) {
 		char *end;
 		unsigned long long value;
@@ -658,8 +698,18 @@ static int vfsi_prefetch_object_data(struct vfsi_source_context *ctx)
 		value = strtoull(setting, &end, 10);
 		if (errno || *end || !*setting || *setting == '-' || value > SIZE_MAX)
 			return -1;
-		ctx->data_limit = (size_t)value;
+		*limit = (size_t)value;
 	}
+
+	return 0;
+}
+
+static int vfsi_prefetch_object_data(struct vfsi_source_context *ctx, size_t *remaining)
+{
+	const char **paths;
+	size_t i, next = 0, chunk, planned = 0;
+	int rc = 0;
+	ctx->data_limit = *remaining;
 
 	if (!ctx->objects_nr)
 		return 0;
@@ -693,6 +743,7 @@ static int vfsi_prefetch_object_data(struct vfsi_source_context *ctx)
 			break;
 	}
 	free(paths);
+	*remaining -= ctx->data_bytes;
 	return rc;
 }
 
@@ -863,12 +914,19 @@ static int vfsi_for_each_loose_file_locked(struct vfsi_source_context *ctx,
 		.display_root = objects_dir,
 	};
 	char *real_objects;
-	size_t i;
-	const char **dirs = NULL;
-	int rc, listed_ids = 0;
+	size_t i, start, prefetch_remaining = 0;
+	const char **dirs = NULL, **display_dirs = NULL;
+	int rc, use_cursors = 0;
+	int prefetch;
+	struct vfsi_listing_options options = {
+		.max_entries = 200000,
+		.max_path_bytes = 64 * 1024 * 1024,
+		.attributes = VFSI_ATTR_MODE | VFSI_ATTR_SIZE | VFSI_ATTR_NLINK |
+			VFSI_ATTR_FILEID | VFSI_ATTR_BLOCKS | VFSI_ATTR_UID |
+			VFSI_ATTR_GID | VFSI_ATTR_ATIME | VFSI_ATTR_MTIME | VFSI_ATTR_CTIME
+	};
 
 	*result = 0;
-
 	real_objects = real_pathdup(objects_dir, 0);
 	if (!real_objects)
 		return 0;
@@ -877,113 +935,154 @@ static int vfsi_for_each_loose_file_locked(struct vfsi_source_context *ctx,
 	strvec_init(&walk.subdirs);
 	strvec_init(&walk.display_subdirs);
 	rc = open_vfsi(ctx, real_objects);
-	if (rc <= 0) {
-		strvec_clear(&walk.subdirs);
-		strvec_clear(&walk.display_subdirs);
-		free(real_objects);
-		return rc;
+	if (rc <= 0)
+		goto out;
+	prefetch = vfsi_prefetch_enabled() &&
+		(vfsi_runtime.bindings.read_paths || vfsi_runtime.bindings.read_paths_with_limit);
+	if (prefetch && vfsi_prefetch_budget(&prefetch_remaining)) {
+		warning(_("vfsi: invalid prefetch budget; using ordinary reads"));
+		prefetch = 0;
 	}
-
-	rc = vfsi_runtime.bindings.listdir(ctx->fs, real_objects,
-				       collect_subdir_cb, &walk);
-	if (rc) {
-		error(_("vfsi: unable to list %s"), real_objects);
-		goto fail;
-	}
-	if (!walk.subdirs.nr)
-		goto done;
-
-	CALLOC_ARRAY(dirs, walk.subdirs.nr);
-	for (i = 0; i < walk.subdirs.nr; i++)
-		dirs[i] = walk.subdirs.v[i];
-	/* Match the normal implementation's numeric subdirectory order
-	 * (objects/00 … objects/ff), which fsck relies on when it learns
-	 * object types while scanning. */
-	QSORT(dirs, walk.subdirs.nr, cmp_subdir_ptr);
-	{
-		struct vfsi_listing_options options = {
-			.max_entries = 200000,
-			.max_path_bytes = 64 * 1024 * 1024,
-			.attributes = VFSI_ATTR_MODE | VFSI_ATTR_SIZE | VFSI_ATTR_NLINK |
-				VFSI_ATTR_FILEID | VFSI_ATTR_BLOCKS | VFSI_ATTR_UID |
-				VFSI_ATTR_GID | VFSI_ATTR_ATIME | VFSI_ATTR_MTIME | VFSI_ATTR_CTIME
-		};
-		struct vfsi_listing_result *results = xcalloc(walk.subdirs.nr, sizeof(*results));
-		walk.ordered_display_dirs = xcalloc(walk.subdirs.nr, sizeof(char *));
-		for (i = 0; i < walk.subdirs.nr; i++)
-			walk.ordered_display_dirs[i] = display_dir_for_real(&walk, dirs[i]);
-#ifdef VFSI_LISTDIR_IDS_VERSION
-		if (vfsi_runtime.bindings.listdirs_with_ids) {
-			listed_ids = 1;
-			rc = vfsi_runtime.bindings.listdirs_with_ids(ctx->fs, dirs, walk.subdirs.nr,
-				&options, loose_entry_ids_cb, &walk, results);
-		} else
+#ifdef VFSI_DIRECTORY_CURSOR_IDS_VERSION
+	use_cursors = vfsi_runtime.bindings.listdirs_from_cursors_with_ids &&
+		vfsi_runtime.bindings.dir_cursor_free;
+	if (use_cursors) {
+		struct vfsi_dir_cursor *cursor = NULL;
+		struct vfsi_listing_result listing = { 0 };
+		const char *root = real_objects;
+		rc = vfsi_runtime.bindings.listdirs_from_cursors_with_ids(ctx->fs,
+			&root, &cursor, 1, &options, collect_subdir_cursor_cb, &walk, &listing);
+		vfsi_runtime.bindings.dir_cursor_free(cursor);
+		if (!rc && listing.completion != 1)
+			rc = EIO;
+	} else
 #endif
-			rc = vfsi_runtime.bindings.listdirs(ctx->fs, dirs, walk.subdirs.nr,
-				&options, loose_entry_cb, &walk, results);
-		for (i = 0; !rc && i < walk.subdirs.nr; i++)
-			if (results[i].completion != 1)
-				rc = EIO;
-		free(results);
-	}
+		rc = vfsi_runtime.bindings.listdir(ctx->fs, real_objects, collect_subdir_cb, &walk);
 	if (rc) {
-		/* Nothing has been replayed. Let the normal complete scan handle
-		 * this repository; some Git callers ignore enumeration errors. */
+		/* Read-only staging has not invoked any Git callbacks. */
 		rc = 0;
 		goto out;
 	}
-	if (getenv("VFSI_TRACE")) {
-		fprintf(stderr, "vfsi: listdirs completed entries=%zu\n", ctx->objects_nr);
-		if (listed_ids) fprintf(stderr, "vfsi: listing identities=inline\n");
+	if (!walk.subdirs.nr) {
+		rc = 1;
+		goto out;
 	}
-	/* Refresh identity and stat attributes in one bounded GETATTR vector.
-	 * Older ABI-v3 adapters still enumerate, but singular stat calls fall back
-	 * rather than fabricate unscoped device/inode values. */
-	if (!listed_ids)
-		vfsi_refresh_object_ids(ctx);
-	if (vfsi_prefetch_enabled() && (vfsi_runtime.bindings.read_paths || vfsi_runtime.bindings.read_paths_with_limit) && vfsi_prefetch_object_data(ctx)) {
-		/* Prefetch is optional; a growth race or tight budget must not turn
-		 * valid repository contents into a failed Git command. */
-		warning(_("vfsi: object prefetch unavailable; using ordinary reads"));
-	}
-	/* Replay each directory in numeric order. Within a directory, retain the
-	 * backend's READDIR order, and invoke subdir_cb immediately after its
-	 * entries, matching for_each_file_in_obj_subdir(). */
-	for (i = 0; i < walk.subdirs.nr; i++) {
-		const char *dir = walk.ordered_display_dirs[i];
-		const char *slash = strrchr(dir, '/');
-		size_t j;
-		unsigned nr;
-		struct vfsi_object_bucket *bucket = strmap_get(&ctx->objects_by_dir, dir);
 
-		for (j = 0; bucket && j < bucket->nr; j++) {
-			struct vfsi_object *obj = &ctx->objects[bucket->indices[j]];
-			*result = process_loose_entry(&walk, obj->display_dir,
-						      obj->name);
+	CALLOC_ARRAY(dirs, walk.subdirs.nr);
+	CALLOC_ARRAY(display_dirs, walk.subdirs.nr);
+	for (i = 0; i < walk.subdirs.nr; i++)
+		dirs[i] = walk.subdirs.v[i];
+	/* Match the normal implementation's numeric fanout order. */
+	QSORT(dirs, walk.subdirs.nr, cmp_subdir_ptr);
+	for (i = 0; i < walk.subdirs.nr; i++)
+		display_dirs[i] = display_dir_for_real(&walk, dirs[i]);
+
+	/* Stage, validate, replay, and release one bounded directory group.
+	 * Never replay a completed prefix if a later group's staging fails. */
+	for (start = 0; start < walk.subdirs.nr; start += 24) {
+		struct vfsi_listing_result results[24] = { { 0 } };
+		size_t count = walk.subdirs.nr - start;
+		int listed_ids = 0;
+		if (count > ARRAY_SIZE(results))
+			count = ARRAY_SIZE(results);
+		walk.batch_count = count;
+		walk.ordered_display_dirs = display_dirs + start;
+		vfsi_clear_objects(ctx);
+#ifdef VFSI_DIRECTORY_CURSOR_IDS_VERSION
+		if (use_cursors) {
+			struct vfsi_dir_cursor *cursors[24] = { NULL };
+			for (i = 0; i < count; i++) {
+				const char *name = strrchr(dirs[start + i], '/') + 1;
+				unsigned nr = (hexval_table[(unsigned char)name[0]] << 4) |
+					hexval_table[(unsigned char)name[1]];
+				cursors[i] = walk.seeds[nr];
+				walk.seeds[nr] = NULL;
+			}
+			listed_ids = 1;
+			rc = vfsi_runtime.bindings.listdirs_from_cursors_with_ids(ctx->fs,
+				dirs + start, cursors, count, &options,
+				loose_entry_cursor_ids_cb, &walk, results);
+			for (i = 0; i < count; i++)
+				vfsi_runtime.bindings.dir_cursor_free(cursors[i]);
+		} else
+#endif
+#ifdef VFSI_LISTDIR_IDS_VERSION
+		if (vfsi_runtime.bindings.listdirs_with_ids) {
+			listed_ids = 1;
+			rc = vfsi_runtime.bindings.listdirs_with_ids(ctx->fs, dirs + start, count,
+				&options, loose_entry_ids_cb, &walk, results);
+		} else
+#endif
+			rc = vfsi_runtime.bindings.listdirs(ctx->fs, dirs + start, count,
+				&options, loose_entry_cb, &walk, results);
+		for (i = 0; !rc && i < count; i++)
+			if (results[i].completion != 1)
+				rc = EIO;
+		if (rc) {
+			struct strbuf path = STRBUF_INIT;
+			vfsi_clear_objects(ctx);
+			strbuf_addstr(&path, objects_dir);
+			if (getenv("VFSI_TRACE"))
+				fprintf(stderr, "vfsi: fanout group fallback start=%zu count=%zu\n", start, count);
+			for (i = 0; i < count; i++) {
+				const char *name = strrchr(dirs[start + i], '/') + 1;
+				unsigned nr = (hexval_table[(unsigned char)name[0]] << 4) |
+					hexval_table[(unsigned char)name[1]];
+				*result = for_each_file_in_obj_subdir(nr, &path, algop,
+					obj_cb, cruft_cb, subdir_cb, data);
+				if (*result)
+					break;
+			}
+			strbuf_release(&path);
+			if (*result)
+				goto handled;
+			continue;
+		}
+		if (getenv("VFSI_TRACE")) {
+			fprintf(stderr, "vfsi: listdirs completed entries=%zu\n", ctx->objects_nr);
+			if (listed_ids)
+				fprintf(stderr, "vfsi: listing identities=inline\n");
+			if (use_cursors)
+				fprintf(stderr, "vfsi: fanout cursors=retained count=%zu\n", count);
+		}
+		if (!listed_ids)
+			vfsi_refresh_object_ids(ctx);
+		if (prefetch && prefetch_remaining && vfsi_prefetch_object_data(ctx, &prefetch_remaining))
+			warning(_("vfsi: object prefetch unavailable; using ordinary reads"));
+		for (i = 0; i < count; i++) {
+			const char *dir = display_dirs[start + i];
+			const char *name = strrchr(dir, '/') + 1;
+			size_t j;
+			unsigned nr;
+			struct vfsi_object_bucket *bucket = strmap_get(&ctx->objects_by_dir, dir);
+			for (j = 0; bucket && j < bucket->nr; j++) {
+				struct vfsi_object *obj = &ctx->objects[bucket->indices[j]];
+				*result = process_loose_entry(&walk, obj->display_dir, obj->name);
+				if (*result)
+					goto handled;
+			}
+			if (!subdir_cb)
+				continue;
+			nr = (hexval_table[(unsigned char)name[0]] << 4) |
+				hexval_table[(unsigned char)name[1]];
+			*result = subdir_cb(nr, dir, data);
 			if (*result)
 				goto handled;
 		}
-		if (!slash || !subdir_cb)
-			continue;
-		nr = (unsigned)hexval_table[(unsigned char)slash[1]];
-		nr = (nr << 4) | hexval_table[(unsigned char)slash[2]];
-		*result = subdir_cb(nr, dir, data);
-		if (*result)
-			goto handled;
 	}
-
 handled:
-done:
 	rc = 1;
-	goto out;
-fail:
-	rc = -1;
 out:
+#ifdef VFSI_DIRECTORY_CURSOR_IDS_VERSION
+	if (vfsi_runtime.bindings.dir_cursor_free)
+		for (i = 0; i < ARRAY_SIZE(walk.seeds); i++)
+			vfsi_runtime.bindings.dir_cursor_free(walk.seeds[i]);
+#endif
 	strvec_clear(&walk.subdirs);
 	strvec_clear(&walk.display_subdirs);
 	free(real_objects);
 	free(dirs);
-	free(walk.ordered_display_dirs);
+	free(display_dirs);
 	return rc;
 }
 

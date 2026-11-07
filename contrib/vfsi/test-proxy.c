@@ -34,7 +34,19 @@ struct vfsi_result vfsi_get_object_idv(vfsi_fs *fs,const vfsi_object_id_op *ops,
 #endif
 #ifndef VFSI_TEST_NO_PREFETCH
 int vfsi_read_paths(vfsi_fs *fs,const char *const *paths,size_t count,vfsi_read_paths_cb cb,void *data) { RESOLVE(vfsi_read_paths); return fn(fs,paths,count,cb,data); }
-int vfsi_read_paths_with_limit(vfsi_fs *fs,const char *const *paths,size_t count,size_t limit,vfsi_read_paths_cb cb,void *data) { RESOLVE(vfsi_read_paths_with_limit); return fn(fs,paths,count,limit,cb,data); }
+struct read_forwarding { vfsi_read_paths_cb cb; void *data; };
+static bool forward_read(const char *path, const unsigned char *bytes, size_t len, void *opaque) {
+    struct read_forwarding *state = opaque;
+    const char *trace = getenv("VFSI_TEST_CALL_LOG");
+    if (trace) { FILE *file = fopen(trace,"a"); if (!file) abort();
+	fprintf(file,"read-bytes %zu\n",len); fclose(file); }
+    return state->cb(path,bytes,len,state->data);
+}
+int vfsi_read_paths_with_limit(vfsi_fs *fs,const char *const *paths,size_t count,size_t limit,vfsi_read_paths_cb cb,void *data) {
+    RESOLVE(vfsi_read_paths_with_limit);
+    struct read_forwarding state = {cb,data};
+    return fn(fs,paths,count,limit,forward_read,&state);
+}
 #endif
 struct forwarding {
     vfsi_indexed_listdir_cb callback;
@@ -59,3 +71,39 @@ int vfsi_listdirs(vfsi_fs *fs,const char *const *paths,size_t count,const vfsi_l
     }
     return rc;
 }
+
+
+#if defined(VFSI_TEST_CURSOR_API) && defined(VFSI_DIRECTORY_CURSOR_IDS_VERSION)
+#ifndef VFSI_TEST_NO_CURSOR_FREE
+void vfsi_dir_cursor_free(vfsi_dir_cursor *cursor) {
+    RESOLVE(vfsi_dir_cursor_free); fn(cursor);
+}
+#endif
+struct cursor_forwarding { vfsi_indexed_listdir_cursor_ids_cb cb; void *data; };
+static bool forward_cursor(size_t index, const char *dir, const char *name,
+			   const vfsi_attrs *attrs, const vfsi_object_id *id,
+			   vfsi_dir_cursor *child, void *opaque) {
+    struct cursor_forwarding *state = opaque;
+    return state->cb(getenv("VFSI_TEST_BAD_INDEX") ? SIZE_MAX : index,
+		     dir,name,attrs,id,child,state->data);
+}
+int vfsi_listdirs_from_cursors_with_ids(vfsi_fs *fs,const char *const *paths,
+	vfsi_dir_cursor **cursors,size_t count,const vfsi_listing_options *options,
+	vfsi_indexed_listdir_cursor_ids_cb cb,void *data,vfsi_listing_result *results) {
+    RESOLVE(vfsi_listdirs_from_cursors_with_ids);
+    static unsigned group;
+    const char *name = strrchr(paths[0],'/');
+    int fanout = name && strlen(name+1)==2;
+    const char *trace = getenv("VFSI_TEST_CALL_LOG");
+    if (fanout) {
+	const char *failure = getenv("VFSI_TEST_GROUP_FAIL");
+	group++;
+	if (trace) { FILE *file=fopen(trace,"a"); if(!file) abort();
+	    fprintf(file,"group %u %zu\n",group,count); fclose(file); }
+	/* Fail preflight without consuming cursors: caller must release them. */
+	if (failure && group==(unsigned)atoi(failure)) return EFBIG;
+    }
+    struct cursor_forwarding state={cb,data};
+    return fn(fs,paths,cursors,count,options,forward_cursor,&state,results);
+}
+#endif
