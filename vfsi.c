@@ -279,6 +279,7 @@ static char *vfsi_connection_key(const char *path)
     return strbuf_detach(&key, NULL);
 }
 
+/* Return zero for POSIX fallback; initialization has not run any callbacks. */
 static int open_vfsi(struct vfsi_source_context *ctx, const char *objects_path)
 {
 	vfsi_dynamic_api *b = &vfsi_runtime.bindings;
@@ -370,7 +371,7 @@ static int open_vfsi(struct vfsi_source_context *ctx, const char *objects_path)
 	}
 	if (rc) {
 		warning(_("vfsi: open failed: %d"), rc);
-		return -1;
+		return 0;
 	}
 	if (getenv("VFSI_TRACE")) fprintf(stderr, "vfsi: connected\n");
 	return 1;

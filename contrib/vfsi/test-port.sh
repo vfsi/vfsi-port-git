@@ -40,6 +40,23 @@ for fault in VFSI_TEST_BAD_ABI VFSI_TEST_PARTIAL VFSI_TEST_BAD_INDEX; do
     diff -u "$fixture/expected" "$fixture/actual"
     if grep -q 'vfsi: listdirs completed' "$fixture/trace"; then exit 1; fi
 done
+# Initialization errors happen before callbacks and must retain POSIX enumeration.
+VFSI_IMPL=off "$binary" -C "$fixture" cat-file --batch-all-objects --batch-check >"$fixture/native-open-objects"
+for mode in dummy nfs; do
+	for command in count objects; do
+		case "$command" in
+			count) set -- count-objects -v; expected="$fixture/expected" ;;
+			objects) set -- cat-file --batch-all-objects --batch-check; expected="$fixture/native-open-objects" ;;
+		esac
+		VFSI_TEST_OPEN_FAIL=1 VFSI_TRACE=1 VFSI_IMPL="$mode" VFSI_LIBRARY="$fixture/proxy.so" \
+			VFSI_ROOT="$fixture" VFSI_HOST=127.0.0.1 VFSI_EXPORT=/ VFSI_MOUNT="$fixture" \
+			"$binary" -C "$fixture" "$@" >"$fixture/actual" 2>"$fixture/trace"
+		diff -u "$expected" "$fixture/actual"
+		grep -q 'vfsi: open failed: 5' "$fixture/trace"
+		if grep -q 'vfsi: listdirs completed' "$fixture/trace"; then exit 1; fi
+	done
+done
+printf '%s\n' 'Filesystem initialization failure retains POSIX object enumeration.'
 # Metadata acceleration remains useful when an adapter lacks prefetch exports.
 ${CC:-cc} -shared -fPIC -DVFSI_TEST_NO_PREFETCH -I"$include" "$repo/contrib/vfsi/test-proxy.c" -ldl -o "$fixture/metadata-only.so"
 VFSI_TRACE=1 VFSI_PREFETCH_OBJECTS=1 VFSI_IMPL=dummy VFSI_LIBRARY="$fixture/metadata-only.so" VFSI_ROOT="$fixture" VFSI_MOUNT="$fixture" \
