@@ -460,17 +460,15 @@ static bool loose_entry_cursor_ids_cb(size_t index, const char *dir, const char 
 #endif
 
 static int process_loose_entry(struct vfsi_walk *walk,
-			       const char *dir, const char *name)
+			       const char *dir, const char *name, const char *path)
 {
 	struct object_id oid;
 	const struct git_hash_algo *algop = walk->algop;
 	size_t namelen = strlen(name);
-	char *path;
 	int rc = 0;
 
 	if (!strcmp(name, ".") || !strcmp(name, ".."))
 		return 0;
-	path = xstrfmt("%s/%s", dir, name);
 	if (namelen == algop->hexsz - 2) {
 		unsigned subdir_nr = (unsigned)hexval_table[(unsigned char)dir[strlen(dir) - 2]];
 
@@ -489,7 +487,6 @@ static int process_loose_entry(struct vfsi_walk *walk,
 	} else if (walk->cruft_cb) {
 		rc = walk->cruft_cb(name, path, walk->data);
 	}
-	free(path);
 	return rc;
 }
 
@@ -909,7 +906,7 @@ static int vfsi_for_each_loose_file_locked(struct vfsi_source_context *ctx,
 			vfsi_clear_objects(ctx);
 			strbuf_addstr(&path, objects_dir);
 			if (getenv("VFSI_TRACE"))
-				fprintf(stderr, "vfsi: fanout group fallback start=%zu count=%zu\n", start, count);
+				fprintf(stderr, "vfsi: fanout group fallback start=%zu count=%zu phase=collect errno=%d replay=unreplayed-group\n", start, count, rc);
 			for (i = 0; i < count; i++) {
 				const char *name = strrchr(dirs[start + i], '/') + 1;
 				unsigned nr = (hexval_table[(unsigned char)name[0]] << 4) |
@@ -925,7 +922,7 @@ static int vfsi_for_each_loose_file_locked(struct vfsi_source_context *ctx,
 			continue;
 		}
 		if (getenv("VFSI_TRACE")) {
-			fprintf(stderr, "vfsi: listdirs completed entries=%zu\n", ctx->objects_nr);
+			fprintf(stderr, "vfsi: listdirs completed entries=%zu phase=collect application_callbacks=0\n", ctx->objects_nr);
 			if (listed_ids)
 				fprintf(stderr, "vfsi: listing identities=inline\n");
 			if (use_cursors)
@@ -943,7 +940,7 @@ static int vfsi_for_each_loose_file_locked(struct vfsi_source_context *ctx,
 			struct vfsi_object_bucket *bucket = strmap_get(&ctx->objects_by_dir, dir);
 			for (j = 0; bucket && j < bucket->nr; j++) {
 				struct vfsi_object *obj = &ctx->objects[bucket->indices[j]];
-				*result = process_loose_entry(&walk, obj->display_dir, obj->name);
+				*result = process_loose_entry(&walk, obj->display_dir, obj->name, obj->display_path);
 				if (*result)
 					goto handled;
 			}
