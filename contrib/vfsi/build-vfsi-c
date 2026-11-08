@@ -11,8 +11,8 @@ case "$#" in
     *) echo "usage: $0 [--headers-only]" >&2; exit 2 ;;
 esac
 
-VFSI_C_VERSION=0.3.14
-VFSI_C_SHA256=5f6dc22117519c5e8f32b759b8274869ffd032608d9988a55d29446d60e99321
+VFSI_C_VERSION=0.3.15
+VFSI_C_SHA256=7fb19f96ead278ba3f1c7c86fdcf46884752c1b47e6a85ebd605ef937ec54e43
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 build_root=${VFSI_BUILD_DIR:-"$root/build-vfsi-c"}
 release_root="$build_root/vfsi-c-$VFSI_C_VERSION"
