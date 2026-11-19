@@ -629,9 +629,11 @@ static int vfsi_prefetch_budget(size_t *limit)
 	if (setting) {
 		char *end;
 		unsigned long long value;
+		if (!*setting || setting[strspn(setting, "0123456789")])
+			return -1;
 		errno = 0;
 		value = strtoull(setting, &end, 10);
-		if (errno || *end || !*setting || *setting == '-' || value > SIZE_MAX)
+		if (errno || *end || value > SIZE_MAX)
 			return -1;
 		*limit = (size_t)value;
 	}

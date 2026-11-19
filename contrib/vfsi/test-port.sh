@@ -61,6 +61,16 @@ for adapter in "$library" "$fixture/proxy.so"; do
 done
 rm "$fanout"
 mv "$fixture/fanout" "$fanout"
+# An invalid byte budget must never dispatch a payload read.
+VFSI_TEST_CALL_LOG="$fixture/bad-budget" VFSI_TRACE=1 VFSI_IMPL=dummy \
+    VFSI_LIBRARY="$fixture/proxy.so" VFSI_ROOT="$fixture" VFSI_MOUNT="$fixture" \
+    VFSI_PREFETCH_OBJECTS=1 VFSI_PREFETCH_BYTES=' -1' \
+    "$binary" -C "$fixture" count-objects -v >"$fixture/actual" 2>"$fixture/trace"
+diff -u "$fixture/expected" "$fixture/actual"
+grep -q 'invalid prefetch budget' "$fixture/trace"
+grep -q 'vfsi: listdirs completed' "$fixture/trace"
+test ! -e "$fixture/bad-budget"
+
 # Initialization errors happen before callbacks and must retain POSIX enumeration.
 VFSI_IMPL=off "$binary" -C "$fixture" cat-file --batch-all-objects --batch-check >"$fixture/native-open-objects"
 for mode in dummy nfs; do
