@@ -53,7 +53,6 @@ struct vfsi_object {
 
 struct vfsi_source_context {
 	struct vfsi_fs *fs;
-	char *mountpoint;
 	char *connection_key;
 	struct vfsi_object *objects;
 	size_t objects_nr;
@@ -160,7 +159,6 @@ void vfsi_source_close(struct odb_source *source)
 	if (ctx->fs && vfsi_runtime.bindings.free)
 		vfsi_runtime.bindings.free(ctx->fs);
 	ctx->fs = NULL;
-	FREE_AND_NULL(ctx->mountpoint);
 	FREE_AND_NULL(ctx->connection_key);
 	pthread_mutex_unlock(&ctx->mutex);
 }
@@ -317,12 +315,6 @@ static int open_vfsi(struct vfsi_source_context *ctx, const char *objects_path)
 		dummy_mount = getenv("VFSI_MOUNT");
 		if (!b->dummy_open_mount || !dummy_root || !dummy_mount)
 			return 0;
-		if (ctx->fs) {
-			b->free(ctx->fs);
-			ctx->fs = NULL;
-		}
-		free(ctx->mountpoint);
-		ctx->mountpoint = xstrdup(dummy_mount);
 		rc = b->dummy_open_mount(dummy_root, dummy_mount, &ctx->fs);
 	} else {
 		host_override = getenv("VFSI_HOST");
@@ -333,8 +325,6 @@ static int open_vfsi(struct vfsi_source_context *ctx, const char *objects_path)
 			 * An old adapter cannot do that safely: keep Git's POSIX path. */
 			if (!b->nfs_from_mount)
 				return 0;
-			if (ctx->fs) b->free(ctx->fs);
-			ctx->fs = NULL;
 			rc = b->nfs_from_mount(objects_path, &ctx->fs);
 			if (!rc && getenv("VFSI_TRACE")) fprintf(stderr, "vfsi: connected\n");
 			return rc ? 0 : 1;
@@ -359,12 +349,6 @@ static int open_vfsi(struct vfsi_source_context *ctx, const char *objects_path)
 			free(mount.mountpoint);
 			mount.mountpoint = xstrdup(mount_override);
 		}
-		if (ctx->fs) {
-			b->free(ctx->fs);
-			ctx->fs = NULL;
-		}
-		free(ctx->mountpoint);
-		ctx->mountpoint = xstrdup(mount.mountpoint);
 		rc = b->nfs_open_mount_export(mount.host, mount.export_root,
 					      mount.mountpoint, &ctx->fs);
 		vfsi_mount_clear(&mount);
