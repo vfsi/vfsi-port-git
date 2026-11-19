@@ -40,6 +40,27 @@ for fault in VFSI_TEST_BAD_ABI VFSI_TEST_PARTIAL VFSI_TEST_BAD_INDEX; do
     diff -u "$fixture/expected" "$fixture/actual"
     if grep -q 'vfsi: listdirs completed' "$fixture/trace"; then exit 1; fi
 done
+# A legacy callback stop still returns success from vfsi_listdir.
+mkdir -p "$fixture/.git/objects/aa" "$fixture/.git/objects/bb"
+VFSI_TEST_BAD_ROOT=1 VFSI_TRACE=1 VFSI_IMPL=dummy VFSI_LIBRARY="$fixture/proxy.so" \
+    VFSI_ROOT="$fixture" VFSI_MOUNT="$fixture" \
+    "$binary" -C "$fixture" count-objects -v >"$fixture/actual" 2>"$fixture/trace"
+diff -u "$fixture/expected" "$fixture/actual"
+if grep -q 'vfsi: listdirs completed' "$fixture/trace"; then exit 1; fi
+
+# Native enumeration follows a symlink used for a loose-object fanout.
+fanout=$(find "$fixture/.git/objects" -mindepth 1 -maxdepth 1 -type d -name '[0-9a-f][0-9a-f]' ! -empty | head -n 1)
+test -n "$fanout"
+mv "$fanout" "$fixture/fanout"
+ln -s "$fixture/fanout" "$fanout"
+for adapter in "$library" "$fixture/proxy.so"; do
+    VFSI_TRACE=1 VFSI_IMPL=dummy VFSI_LIBRARY="$adapter" VFSI_ROOT="$fixture" VFSI_MOUNT="$fixture" \
+	"$binary" -C "$fixture" count-objects -v >"$fixture/actual" 2>"$fixture/trace"
+    diff -u "$fixture/expected" "$fixture/actual"
+    if grep -q 'vfsi: listdirs completed' "$fixture/trace"; then exit 1; fi
+done
+rm "$fanout"
+mv "$fixture/fanout" "$fanout"
 # Initialization errors happen before callbacks and must retain POSIX enumeration.
 VFSI_IMPL=off "$binary" -C "$fixture" cat-file --batch-all-objects --batch-check >"$fixture/native-open-objects"
 for mode in dummy nfs; do

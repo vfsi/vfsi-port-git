@@ -24,7 +24,20 @@ int vfsi_nfs_open_mount_export(const char *a,const char *b,const char *c,vfsi_fs
     if (getenv("VFSI_TEST_OPEN_FAIL")) { *out = NULL; return EIO; }
     RESOLVE(vfsi_nfs_open_mount_export); return fn(a,b,c,out);
 }
-int vfsi_listdir(vfsi_fs *fs,const char *p,vfsi_listdir_cb cb,void *data) { RESOLVE(vfsi_listdir); return fn(fs,p,cb,data); }
+struct root_forwarding { vfsi_listdir_cb cb; void *data; unsigned fanouts; };
+static bool forward_root(const char *name, const vfsi_attrs *attrs, void *opaque) {
+    struct root_forwarding *state = opaque;
+    if (strlen(name) == 2 && ++state->fanouts == 2)
+	return state->cb(name, NULL, state->data);
+    return state->cb(name, attrs, state->data);
+}
+int vfsi_listdir(vfsi_fs *fs,const char *p,vfsi_listdir_cb cb,void *data) {
+    RESOLVE(vfsi_listdir);
+    struct root_forwarding state = {cb,data,0};
+    if (getenv("VFSI_TEST_BAD_ROOT"))
+	return fn(fs,p,forward_root,&state);
+    return fn(fs,p,cb,data);
+}
 #ifndef VFSI_TEST_NO_IDENTITY
 struct vfsi_result vfsi_get_object_idv(vfsi_fs *fs,const vfsi_object_id_op *ops,size_t count,vfsi_result *results) {
     RESOLVE(vfsi_get_object_idv);

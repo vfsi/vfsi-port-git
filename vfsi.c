@@ -390,6 +390,7 @@ struct vfsi_walk {
 	const char *real_root;
 	const char **ordered_display_dirs;
 	size_t batch_count;
+	int root_rejected;
 #ifdef VFSI_DIRECTORY_CURSOR_IDS_VERSION
 	struct vfsi_dir_cursor *seeds[256];
 #endif
@@ -421,10 +422,14 @@ static bool collect_subdir_cb(const char *name, const struct vfsi_attrs *attrs,
 {
 	struct vfsi_walk *walk = userdata;
 
-	if (!name || !vfsi_attrs_valid(attrs))
-		return false;
-	if (attrs->ftype != VFSI_NF4DIR || !is_hexpair(name))
+	if (name && !is_hexpair(name))
 		return true;
+	/* Git's native fanout scan follows directory symlinks and reports
+	 * errors for other non-directory fanouts. Leave those to it. */
+	if (!name || !vfsi_attrs_valid(attrs) || attrs->ftype != VFSI_NF4DIR) {
+		walk->root_rejected = 1;
+		return false;
+	}
 	strvec_pushf(&walk->subdirs, "%s/%s", walk->real_root, name);
 	strvec_pushf(&walk->display_subdirs, "%s/%s",
 		     walk->display_root, name);
@@ -842,7 +847,7 @@ static int vfsi_for_each_loose_file_locked(struct vfsi_source_context *ctx,
 	} else
 #endif
 		rc = vfsi_runtime.bindings.listdir(ctx->fs, real_objects, collect_subdir_cb, &walk);
-	if (rc) {
+	if (rc || walk.root_rejected) {
 		/* Read-only staging has not invoked any Git callbacks. */
 		rc = 0;
 		goto out;
