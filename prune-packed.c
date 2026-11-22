@@ -48,8 +48,9 @@ void prune_packed_objects(struct repository *r, int opts)
 		progress = start_delayed_progress(r,
 						  _("Removing duplicate objects"), 256);
 
-	for_each_loose_file_in_source(r->objects->source,
-				      prune_object, NULL, prune_subdir, &cb_data);
+	for_each_loose_file_in_source_with_flags(r->objects->source,
+						prune_object, NULL, prune_subdir,
+						&cb_data, LOOSE_FILES_METADATA_ONLY);
 
 	/* Ensure we show 100% before finishing progress */
 	display_progress(progress, 256);

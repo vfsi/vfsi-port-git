@@ -61,6 +61,19 @@ for adapter in "$library" "$fixture/proxy.so"; do
 done
 rm "$fanout"
 mv "$fixture/fanout" "$fanout"
+# Preserve the native spelling of a caller-supplied object directory.
+object_dir="$fixture/.git/objects/"
+printf 'loose garbage\n' > "${object_dir}aa/garbage"
+GIT_OBJECT_DIRECTORY="$object_dir" VFSI_IMPL=off \
+    "$binary" -C "$fixture" count-objects -v >"$fixture/native-slash" 2>"$fixture/native-warnings"
+GIT_OBJECT_DIRECTORY="$object_dir" VFSI_TRACE=1 VFSI_IMPL=dummy VFSI_LIBRARY="$library" \
+    VFSI_ROOT="$fixture" VFSI_MOUNT="$fixture" \
+    "$binary" -C "$fixture" count-objects -v >"$fixture/vector-slash" 2>"$fixture/trace"
+grep -q 'vfsi: listdirs completed' "$fixture/trace"
+grep '^warning:' "$fixture/trace" >"$fixture/vector-warnings"
+diff -u "$fixture/native-slash" "$fixture/vector-slash"
+diff -u "$fixture/native-warnings" "$fixture/vector-warnings"
+rm "${object_dir}aa/garbage"
 # An invalid byte budget must never dispatch a payload read.
 VFSI_TEST_CALL_LOG="$fixture/bad-budget" VFSI_TRACE=1 VFSI_IMPL=dummy \
     VFSI_LIBRARY="$fixture/proxy.so" VFSI_ROOT="$fixture" VFSI_MOUNT="$fixture" \
@@ -72,7 +85,9 @@ test ! -e "$fixture/bad-budget"
 
 # Initialization errors happen before callbacks and must retain POSIX enumeration.
 VFSI_IMPL=off "$binary" -C "$fixture" cat-file --batch-all-objects --batch-check >"$fixture/native-open-objects"
-for mode in dummy nfs; do
+set -- dummy
+if test "$(uname -s)" = Linux; then set -- "$@" nfs; fi
+for mode do
 	for command in count objects; do
 		case "$command" in
 			count) set -- count-objects -v; expected="$fixture/expected" ;;
@@ -87,6 +102,37 @@ for mode in dummy nfs; do
 	done
 done
 printf '%s\n' 'Filesystem initialization failure retains POSIX object enumeration.'
+if test "$(uname -s)" = Linux; then
+	cat >"$fixture/mount-table.c" <<'EOF'
+#include <dlfcn.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+FILE *fopen(const char *path, const char *mode)
+{
+	FILE *(*open_file)(const char *, const char *) = dlsym(RTLD_NEXT, "fopen");
+	if (!strcmp(path, "/proc/self/mountinfo"))
+		path = getenv("VFSI_TEST_MOUNTINFO");
+	return open_file(path, mode);
+}
+
+FILE *fopen64(const char *path, const char *mode)
+{
+	return fopen(path, mode);
+}
+EOF
+	${CC:-cc} -shared -fPIC "$fixture/mount-table.c" -ldl -o "$fixture/mount-table.so"
+	printf '%s\n' "1 0 0:1 / / rw - tmpfs tmpfs rw" \
+		"2 1 0:2 / $fixture/.git/objects/nested\040mount rw - tmpfs tmpfs rw" \
+		>"$fixture/mountinfo"
+	LD_PRELOAD="$fixture/mount-table.so" VFSI_TEST_MOUNTINFO="$fixture/mountinfo" \
+		VFSI_TEST_OPEN_FAIL=1 VFSI_TRACE=1 VFSI_IMPL=nfs VFSI_LIBRARY="$fixture/proxy.so" \
+		VFSI_HOST=127.0.0.1 VFSI_EXPORT=/ VFSI_MOUNT="$fixture" \
+		"$binary" -C "$fixture" count-objects -v >"$fixture/actual" 2>"$fixture/trace"
+	diff -u "$fixture/expected" "$fixture/actual"
+	if grep -Eq 'vfsi: (open failed|listdirs completed)' "$fixture/trace"; then exit 1; fi
+fi
 # Metadata acceleration remains useful when an adapter lacks prefetch exports.
 ${CC:-cc} -shared -fPIC -DVFSI_TEST_NO_PREFETCH -I"$include" "$repo/contrib/vfsi/test-proxy.c" -ldl -o "$fixture/metadata-only.so"
 VFSI_TRACE=1 VFSI_PREFETCH_OBJECTS=1 VFSI_IMPL=dummy VFSI_LIBRARY="$fixture/metadata-only.so" VFSI_ROOT="$fixture" VFSI_MOUNT="$fixture" \
@@ -219,3 +265,26 @@ printf '%s\n' 'Retained fanout, bounded groups, late fallback and shared prefetc
 else
     printf '%s\n' 'Cursor-specific cases unavailable; legacy library parity and fallback passed.'
 fi
+
+# Prune-packed and the maintenance scans only enumerate names and object IDs.
+# Keep a reachable duplicate loose so the dry run actually traverses it.
+"$binary" -C "$fixture" pack-objects --all "$fixture/.git/objects/pack/pack" </dev/null >/dev/null
+VFSI_IMPL=off "$binary" -C "$fixture" prune-packed -n >"$fixture/native-prune"
+grep -q '^rm -f ' "$fixture/native-prune"
+VFSI_TEST_CALL_LOG="$fixture/metadata-reads" VFSI_TRACE=1 VFSI_IMPL=dummy \
+    VFSI_LIBRARY="$fixture/proxy.so" VFSI_ROOT="$fixture" VFSI_MOUNT="$fixture" \
+    VFSI_PREFETCH_OBJECTS=1 \
+    "$binary" -C "$fixture" prune-packed -n >"$fixture/vector-prune" 2>"$fixture/trace"
+grep -q 'vfsi: listdirs completed' "$fixture/trace"
+sort "$fixture/native-prune" >"$fixture/native-prune-sorted"
+sort "$fixture/vector-prune" >"$fixture/vector-prune-sorted"
+diff -u "$fixture/native-prune-sorted" "$fixture/vector-prune-sorted"
+test ! -e "$fixture/metadata-reads"
+
+VFSI_TEST_CALL_LOG="$fixture/metadata-reads" VFSI_TRACE=1 VFSI_IMPL=dummy \
+    VFSI_LIBRARY="$fixture/proxy.so" VFSI_ROOT="$fixture" VFSI_MOUNT="$fixture" \
+    VFSI_PREFETCH_OBJECTS=1 \
+    "$binary" -C "$fixture" -c maintenance.loose-objects.auto=1 \
+    maintenance run --auto --task=loose-objects 2>"$fixture/trace"
+grep -q 'vfsi: listdirs completed' "$fixture/trace"
+test ! -e "$fixture/metadata-reads"

@@ -28,6 +28,10 @@ The published adapter also exposes mount discovery. With `VFSI_IMPL=nfs`
 and no explicit host/export/mount overrides, the port inherits the mount's
 version, port, and supported authentication rather than guessing AUTH_SYS.
 An older adapter without discovery keeps Git's ordinary filesystem path.
+Explicit NFS mappings use a canonical mount path and are accelerated only
+when Linux mount information confirms that the mapping covers the object
+directory without a nested mount in its path or subtree. Git rechecks
+that mapping before reusing the connection.
 Direct access does not share the kernel client's caches.
 
 `VFSI_PREFETCH_OBJECTS=1` enables prefetch for object readers.

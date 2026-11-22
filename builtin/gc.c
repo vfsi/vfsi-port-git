@@ -1005,9 +1005,9 @@ static int loose_object_auto_condition(struct gc_config *cfg UNUSED)
 	if (loose_object_auto_limit < 0)
 		return 1;
 
-	return for_each_loose_file_in_source(the_repository->objects->source,
-					     loose_object_count,
-					     NULL, NULL, &count);
+	return for_each_loose_file_in_source_with_flags(
+		the_repository->objects->source, loose_object_count,
+		NULL, NULL, &count, LOOSE_FILES_METADATA_ONLY);
 }
 
 static int bail_on_loose(const struct object_id *oid UNUSED,
@@ -1040,9 +1040,9 @@ static int pack_loose(struct maintenance_run_opts *opts)
 	 * Do not start pack-objects process
 	 * if there are no loose objects.
 	 */
-	if (!for_each_loose_file_in_source(r->objects->source,
-					   bail_on_loose,
-					   NULL, NULL, NULL))
+	if (!for_each_loose_file_in_source_with_flags(
+		    r->objects->source, bail_on_loose, NULL, NULL, NULL,
+		    LOOSE_FILES_METADATA_ONLY))
 		return 0;
 
 	pack_proc.git_cmd = 1;
@@ -1080,9 +1080,9 @@ static int pack_loose(struct maintenance_run_opts *opts)
 	else if (data.batch_size > 0)
 		data.batch_size--; /* Decrease for equality on limit. */
 
-	for_each_loose_file_in_source(r->objects->source,
-				      write_loose_object_to_stdin,
-				      NULL, NULL, &data);
+	for_each_loose_file_in_source_with_flags(
+		r->objects->source, write_loose_object_to_stdin,
+		NULL, NULL, &data, LOOSE_FILES_METADATA_ONLY);
 
 	fclose(data.in);
 

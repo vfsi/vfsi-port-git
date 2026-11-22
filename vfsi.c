@@ -32,7 +32,13 @@ static struct {
 	enum vfsi_loader_state loader_state;
 	pthread_mutex_t mutex;
 	struct vfsi_identity_map identity_map;
-} vfsi_runtime = { .mutex = PTHREAD_MUTEX_INITIALIZER };
+} vfsi_runtime = {
+#if HAVE_THREADS
+	.mutex = PTHREAD_MUTEX_INITIALIZER,
+#else
+	.mutex = 0,
+#endif
+};
 
 enum {
 	VFSI_NF4DIR = 2,
@@ -54,6 +60,7 @@ struct vfsi_object {
 struct vfsi_source_context {
 	struct vfsi_fs *fs;
 	char *connection_key;
+	char *explicit_mount;
 	struct vfsi_object *objects;
 	size_t objects_nr;
 	size_t objects_cap;
@@ -160,6 +167,7 @@ void vfsi_source_close(struct odb_source *source)
 		vfsi_runtime.bindings.free(ctx->fs);
 	ctx->fs = NULL;
 	FREE_AND_NULL(ctx->connection_key);
+	FREE_AND_NULL(ctx->explicit_mount);
 	pthread_mutex_unlock(&ctx->mutex);
 }
 
@@ -260,6 +268,7 @@ static char *vfsi_connection_key(const char *path)
     struct stat st;
     gid_t *groups;
     int count, i;
+    size_t setting;
     const char *settings[] = { "VFSI_IMPL", "VFSI_HOST", "VFSI_EXPORT", "VFSI_MOUNT", "VFSI_ROOT" };
     if (stat(path, &st) || (count = getgroups(0, NULL)) < 0)
 	return NULL;
@@ -269,12 +278,100 @@ static char *vfsi_connection_key(const char *path)
 	(uintmax_t)st.st_dev, (uintmax_t)st.st_ino, (uintmax_t)geteuid(), (uintmax_t)getegid());
     for (i = 0; i < count; i++) strbuf_addf(&key, ":%"PRIuMAX, (uintmax_t)groups[i]);
     free(groups);
-    for (i = 0; i < ARRAY_SIZE(settings); i++) {
-	const char *value = getenv(settings[i]);
+    for (setting = 0; setting < ARRAY_SIZE(settings); setting++) {
+	const char *value = getenv(settings[setting]);
 	strbuf_addf(&key, ":%zu:", value ? strlen(value) : 0);
 	if (value) strbuf_addstr(&key, value);
     }
     return strbuf_detach(&key, NULL);
+}
+
+#ifdef __linux__
+static int vfsi_path_under(const char *path, const char *root)
+{
+	const char *suffix;
+
+	return !strcmp(root, "/") ||
+		(skip_prefix(path, root, &suffix) && (!*suffix || *suffix == '/'));
+}
+
+static int vfsi_decode_mountpoint(char *path)
+{
+	const char *src = path;
+	char *dest = path;
+
+	while (*src) {
+		if (*src != '\\') {
+			*dest++ = *src++;
+			continue;
+		}
+		if (skip_prefix(src, "\\040", &src))
+			*dest++ = ' ';
+		else if (skip_prefix(src, "\\011", &src))
+			*dest++ = '\t';
+		else if (skip_prefix(src, "\\012", &src))
+			*dest++ = '\n';
+		else if (skip_prefix(src, "\\134", &src))
+			*dest++ = '\\';
+		else
+			return 0;
+	}
+	*dest = '\0';
+	return *path == '/';
+}
+#endif
+
+/* The explicit SDK opener does not check the kernel mount namespace. */
+static int vfsi_explicit_mount_safe(const char *objects, const char *mount)
+{
+#ifdef __linux__
+	struct strbuf root = STRBUF_INIT, line = STRBUF_INIT;
+	FILE *table = NULL;
+	int safe = 0, covered = 0;
+
+	if (!strbuf_realpath(&root, mount, 0) || strcmp(root.buf, mount) ||
+	    !vfsi_path_under(objects, root.buf))
+		goto out;
+
+	table = fopen("/proc/self/mountinfo", "r");
+	if (!table)
+		goto out;
+
+	while (strbuf_getline_lf(&line, table) != EOF) {
+		char *point = line.buf, *end;
+		int i;
+
+		/* The mount point follows four space-delimited fields. */
+		for (i = 0; i < 4; i++) {
+			end = strchr(point, ' ');
+			if (!end)
+				goto out;
+			point = end + 1;
+		}
+		end = strchr(point, ' ');
+		if (!end)
+			goto out;
+		*end = '\0';
+		if (!vfsi_decode_mountpoint(point))
+			goto out;
+		if (vfsi_path_under(root.buf, point))
+			covered = 1;
+		else if (vfsi_path_under(point, objects) ||
+			 vfsi_path_under(objects, point))
+			goto out;
+	}
+	safe = covered && feof(table) && !ferror(table);
+out:
+	if (table)
+		fclose(table);
+	strbuf_release(&root);
+	strbuf_release(&line);
+	return safe;
+#else
+	(void)objects;
+	(void)mount;
+	return 0;
+#endif
 }
 
 /* Return zero for POSIX fallback; initialization has not run any callbacks. */
@@ -292,7 +389,7 @@ static int open_vfsi(struct vfsi_source_context *ctx, const char *objects_path)
 	int rc;
 	char *key;
 
-	if (!impl || !strcmp(impl, "off") || !library)
+	if (!impl || !strcmp(impl, "off") || !library || !*library)
 		return 0;
 	if (strcmp(impl, "nfs") && strcmp(impl, "dummy"))
 		return 0;
@@ -303,12 +400,22 @@ static int open_vfsi(struct vfsi_source_context *ctx, const char *objects_path)
 	key = vfsi_connection_key(objects_path);
 	if (!key) return 0;
 	if (ctx->fs && ctx->connection_key && !strcmp(key, ctx->connection_key)) {
-		free(key);
-		return 1;
+		int safe = !strcmp(impl, "dummy");
+
+		if (ctx->explicit_mount)
+			safe = vfsi_explicit_mount_safe(objects_path, ctx->explicit_mount);
+		else if (!safe)
+			safe = vfsi_mount_for(objects_path, &mount);
+		vfsi_mount_clear(&mount);
+		if (safe) {
+			free(key);
+			return 1;
+		}
 	}
 	if (ctx->fs) vfsi_runtime.bindings.free(ctx->fs);
 	ctx->fs = NULL;
 	FREE_AND_NULL(ctx->connection_key);
+	FREE_AND_NULL(ctx->explicit_mount);
 	ctx->connection_key = key;
 	if (!strcmp(impl, "dummy")) {
 		dummy_root = getenv("VFSI_ROOT");
@@ -349,8 +456,14 @@ static int open_vfsi(struct vfsi_source_context *ctx, const char *objects_path)
 			free(mount.mountpoint);
 			mount.mountpoint = xstrdup(mount_override);
 		}
+		if (!vfsi_explicit_mount_safe(objects_path, mount.mountpoint)) {
+			vfsi_mount_clear(&mount);
+			return 0;
+		}
 		rc = b->nfs_open_mount_export(mount.host, mount.export_root,
 					      mount.mountpoint, &ctx->fs);
+		if (!rc)
+			ctx->explicit_mount = xstrdup(mount.mountpoint);
 		vfsi_mount_clear(&mount);
 	}
 	if (rc) {
@@ -414,9 +527,10 @@ static bool collect_subdir_cb(const char *name, const struct vfsi_attrs *attrs,
 		walk->root_rejected = 1;
 		return false;
 	}
-	strvec_pushf(&walk->subdirs, "%s/%s", walk->real_root, name);
-	strvec_pushf(&walk->display_subdirs, "%s/%s",
-		     walk->display_root, name);
+	strvec_pushf(&walk->subdirs, "%s%s%s", walk->real_root,
+		     ends_with(walk->real_root, "/") ? "" : "/", name);
+	strvec_pushf(&walk->display_subdirs, "%s%s%s", walk->display_root,
+		     ends_with(walk->display_root, "/") ? "" : "/", name);
 	return true;
 }
 
@@ -970,11 +1084,16 @@ int vfsi_for_each_loose_file(struct odb_source *source,
 			     each_loose_subdir_fn subdir_cb,
 			     void *data, unsigned int flags, int *result)
 {
+	const char *impl = getenv("VFSI_IMPL");
+	const char *library = getenv("VFSI_LIBRARY");
 	struct vfsi_source_context *ctx;
 	int rc;
 
 	if (!result)
 		BUG("vfsi_for_each_loose_file requires a result pointer");
+	if (!impl || (strcmp(impl, "nfs") && strcmp(impl, "dummy")) ||
+	    !library || !*library)
+		return 0;
 	ctx = vfsi_source_context(source, 1);
 	if (!ctx)
 		return 0;
