@@ -18,9 +18,11 @@ build_root=${VFSI_BUILD_DIR:-"$root/build-vfsi-c"}
 release_root="$build_root/vfsi-c-$VFSI_C_VERSION"
 if test -n "${VFSI_SDK_SOURCE:-}" && test "$headers_only" = 1; then
     source_dir=$VFSI_SDK_SOURCE
-    test -f "$source_dir/include/vfsi.h" || {
-        echo "$0: missing vfsi.h in $source_dir/include" >&2; exit 1
-    }
+    for header in vfsi.h vfsi_dynamic.h vfsi_posix.h; do
+        test -f "$source_dir/include/$header" || {
+            echo "$0: missing $header in $source_dir/include" >&2; exit 1
+        }
+    done
     printf 'VFSI C header: %s/include/vfsi.h\n' "$source_dir"
     if test -n "${GITHUB_OUTPUT:-}"; then
         printf 'include=%s/include\n' "$source_dir" >>"$GITHUB_OUTPUT"
@@ -52,7 +54,10 @@ release = Path(release)
 archive = release / f"vfsi-c-{version}.crate"
 source = release / "source"
 marker = Path(".vfsi-release")
-required = (Path("include/vfsi.h"), Path("build-sdk.py"), Path("Cargo.toml"))
+required = (
+    Path("include/vfsi.h"), Path("include/vfsi_dynamic.h"), Path("include/vfsi_posix.h"),
+    Path("build-sdk.py"), Path("Cargo.toml"), Path("Cargo.lock"),
+)
 
 def verify(path):
     digest = hashlib.sha256()
