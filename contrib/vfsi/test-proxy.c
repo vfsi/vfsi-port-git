@@ -128,11 +128,17 @@ int vfsi_listdirs_from_cursors_with_ids(vfsi_fs *fs,const char *const *paths,
     const char *trace = getenv("VFSI_TEST_CALL_LOG");
     if (fanout) {
 	const char *failure = getenv("VFSI_TEST_GROUP_FAIL");
+	const char *timeout = getenv("VFSI_TEST_GROUP_TIMEOUT");
+	const char *io_error = getenv("VFSI_TEST_GROUP_IO");
+	const char *incomplete = getenv("VFSI_TEST_GROUP_INCOMPLETE");
 	group++;
 	if (trace) { FILE *file=fopen(trace,"a"); if(!file) abort();
 	    fprintf(file,"group %u %zu\n",group,count); fclose(file); }
 	/* Fail preflight without consuming cursors: caller must release them. */
 	if (failure && group==(unsigned)atoi(failure)) return EFBIG;
+	if (timeout && group>=(unsigned)atoi(timeout)) return ETIMEDOUT;
+	if (io_error && group>=(unsigned)atoi(io_error)) return EIO;
+	if (incomplete && group==(unsigned)atoi(incomplete)) return 0;
     }
     struct cursor_forwarding state={cb,data};
     return fn(fs,paths,cursors,count,options,forward_cursor,&state,results);

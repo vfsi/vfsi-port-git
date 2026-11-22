@@ -251,6 +251,27 @@ for failure in 0 1 2 11; do
 	grep -q 'vfsi: fanout group fallback' "$fixture/trace"
     fi
 done
+# A connection loss keeps the completed prefix and uses POSIX for all remaining fanouts.
+for fault in VFSI_TEST_GROUP_TIMEOUT VFSI_TEST_GROUP_IO; do
+    : >"$fixture/calls"
+    env "$fault=2" VFSI_TEST_CALL_LOG="$fixture/calls" \
+	VFSI_TRACE=1 VFSI_IMPL=dummy VFSI_LIBRARY="$fixture/cursors.so" \
+	VFSI_ROOT="$fixture" VFSI_MOUNT="$fixture" \
+	"$binary" -C "$fixture" count-objects -v >"$fixture/actual" 2>"$fixture/trace"
+    diff -u "$fixture/expected" "$fixture/actual"
+    test "$(grep -c '^group ' "$fixture/calls")" -eq 2
+    test "$(grep -c 'vfsi: fanout cursors=retained' "$fixture/trace")" -eq 1
+    grep -q 'vfsi: fanout group fallback .*replay=unreplayed-suffix' "$fixture/trace"
+done
+# An SDK success that leaves an incomplete group is a local validation failure.
+: >"$fixture/calls"
+VFSI_TEST_GROUP_INCOMPLETE=2 VFSI_TEST_CALL_LOG="$fixture/calls" \
+    VFSI_TRACE=1 VFSI_IMPL=dummy VFSI_LIBRARY="$fixture/cursors.so" \
+    VFSI_ROOT="$fixture" VFSI_MOUNT="$fixture" \
+    "$binary" -C "$fixture" count-objects -v >"$fixture/actual" 2>"$fixture/trace"
+diff -u "$fixture/expected" "$fixture/actual"
+test "$(grep -c '^group ' "$fixture/calls")" -ge 3
+grep -q 'vfsi: fanout group fallback .*replay=unreplayed-group' "$fixture/trace"
 # Content consumers still share one prefetch budget across fanout groups.
 : >"$fixture/calls"
 VFSI_TEST_CALL_LOG="$fixture/calls" VFSI_TRACE=1 VFSI_IMPL=dummy \

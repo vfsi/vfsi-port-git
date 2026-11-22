@@ -46,8 +46,9 @@ indexes rather than scanning every cached object for every directory.
 Loose directories are staged in numeric fanout groups of at most 24 directories,
 with a shared 200,000-entry/64 MiB path budget for each group. Each group is
 validated before callbacks and released after replay. An overflowing or failed
-group uses Git's ordinary traversal for those directories only; earlier callbacks
-are never replayed. This avoids an all-repository snapshot limit.
+group uses Git's ordinary traversal for its directories. A connection failure
+uses ordinary traversal for all remaining directories. Earlier callbacks are
+never replayed. This avoids an all-repository snapshot limit.
 
 When the library supplies both optional cursor-identity listing and cursor-free
 symbols, admitted fanout directories retain their parent identity across groups.

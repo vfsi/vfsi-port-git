@@ -155,6 +155,15 @@ void vfsi_source_invalidate(struct odb_source *source)
 	pthread_mutex_unlock(&ctx->mutex);
 }
 
+static void vfsi_close_connection(struct vfsi_source_context *ctx)
+{
+	if (ctx->fs && vfsi_runtime.bindings.free)
+		vfsi_runtime.bindings.free(ctx->fs);
+	ctx->fs = NULL;
+	FREE_AND_NULL(ctx->connection_key);
+	FREE_AND_NULL(ctx->explicit_mount);
+}
+
 void vfsi_source_close(struct odb_source *source)
 {
 	struct vfsi_source_context *ctx = vfsi_source_context(source, 0);
@@ -163,11 +172,7 @@ void vfsi_source_close(struct odb_source *source)
 		return;
 	pthread_mutex_lock(&ctx->mutex);
 	vfsi_clear_objects(ctx);
-	if (ctx->fs && vfsi_runtime.bindings.free)
-		vfsi_runtime.bindings.free(ctx->fs);
-	ctx->fs = NULL;
-	FREE_AND_NULL(ctx->connection_key);
-	FREE_AND_NULL(ctx->explicit_mount);
+	vfsi_close_connection(ctx);
 	pthread_mutex_unlock(&ctx->mutex);
 }
 
@@ -412,10 +417,7 @@ static int open_vfsi(struct vfsi_source_context *ctx, const char *objects_path)
 			return 1;
 		}
 	}
-	if (ctx->fs) vfsi_runtime.bindings.free(ctx->fs);
-	ctx->fs = NULL;
-	FREE_AND_NULL(ctx->connection_key);
-	FREE_AND_NULL(ctx->explicit_mount);
+	vfsi_close_connection(ctx);
 	ctx->connection_key = key;
 	if (!strcmp(impl, "dummy")) {
 		dummy_root = getenv("VFSI_ROOT");
@@ -879,6 +881,27 @@ int vfsi_read_loose_object(struct odb_source *source, const char *path,
 	return 1;
 }
 
+static int vfsi_connection_failed(int error)
+{
+	switch (error) {
+	/* Some adapter transport failures are returned as generic I/O errors. */
+	case EIO:
+	case ETIMEDOUT:
+	case ECONNABORTED:
+	case ECONNREFUSED:
+	case ECONNRESET:
+	case EHOSTUNREACH:
+	case ENETDOWN:
+	case ENETRESET:
+	case ENETUNREACH:
+	case ENOTCONN:
+	case EPIPE:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
 static int vfsi_for_each_loose_file_locked(struct vfsi_source_context *ctx,
 					   const char *objects_dir,
 					   const struct git_hash_algo *algop,
@@ -899,7 +922,7 @@ static int vfsi_for_each_loose_file_locked(struct vfsi_source_context *ctx,
 	char *real_objects;
 	size_t i, start, prefetch_remaining = 0;
 	const char **dirs = NULL, **display_dirs = NULL;
-	int rc, use_cursors = 0;
+	int rc, use_cursors = 0, root_incomplete = 0, reset_connection = 0;
 	int prefetch;
 	struct vfsi_listing_options options = {
 		.max_entries = 200000,
@@ -937,12 +960,12 @@ static int vfsi_for_each_loose_file_locked(struct vfsi_source_context *ctx,
 		rc = vfsi_runtime.bindings.listdirs_from_cursors_with_ids(ctx->fs,
 			&root, &cursor, 1, &options, collect_subdir_cursor_cb, &walk, &listing);
 		vfsi_runtime.bindings.dir_cursor_free(cursor);
-		if (!rc && listing.completion != 1)
-			rc = EIO;
+		root_incomplete = listing.completion != 1;
 	} else
 #endif
 		rc = vfsi_runtime.bindings.listdir(ctx->fs, real_objects, collect_subdir_cb, &walk);
-	if (rc || walk.root_rejected) {
+	reset_connection = vfsi_connection_failed(rc);
+	if (rc || root_incomplete || walk.root_rejected) {
 		/* Read-only staging has not invoked any Git callbacks. */
 		rc = 0;
 		goto out;
@@ -999,16 +1022,20 @@ static int vfsi_for_each_loose_file_locked(struct vfsi_source_context *ctx,
 #endif
 			rc = vfsi_runtime.bindings.listdirs(ctx->fs, dirs + start, count,
 				&options, loose_entry_cb, &walk, results);
+		reset_connection = vfsi_connection_failed(rc);
 		for (i = 0; !rc && i < count; i++)
 			if (results[i].completion != 1)
 				rc = EIO;
 		if (rc) {
 			struct strbuf path = STRBUF_INIT;
+			size_t native_count = reset_connection ? walk.subdirs.nr - start : count;
 			vfsi_clear_objects(ctx);
 			strbuf_addstr(&path, objects_dir);
 			if (getenv("VFSI_TRACE"))
-				fprintf(stderr, "vfsi: fanout group fallback start=%zu count=%zu phase=collect errno=%d replay=unreplayed-group\n", start, count, rc);
-			for (i = 0; i < count; i++) {
+				fprintf(stderr, "vfsi: fanout group fallback start=%zu count=%zu phase=collect errno=%d replay=%s\n",
+					start, native_count, rc,
+					reset_connection ? "unreplayed-suffix" : "unreplayed-group");
+			for (i = 0; i < native_count; i++) {
 				const char *name = strrchr(dirs[start + i], '/') + 1;
 				unsigned nr = (hexval_table[(unsigned char)name[0]] << 4) |
 					hexval_table[(unsigned char)name[1]];
@@ -1018,7 +1045,7 @@ static int vfsi_for_each_loose_file_locked(struct vfsi_source_context *ctx,
 					break;
 			}
 			strbuf_release(&path);
-			if (*result)
+			if (*result || reset_connection)
 				goto handled;
 			continue;
 		}
@@ -1062,6 +1089,8 @@ out:
 		for (i = 0; i < ARRAY_SIZE(walk.seeds); i++)
 			vfsi_runtime.bindings.dir_cursor_free(walk.seeds[i]);
 #endif
+	if (reset_connection)
+		vfsi_close_connection(ctx);
 	strvec_clear(&walk.subdirs);
 	strvec_clear(&walk.display_subdirs);
 	free(real_objects);
