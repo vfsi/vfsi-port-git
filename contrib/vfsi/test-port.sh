@@ -187,18 +187,28 @@ grep -q 'vfsi: listdirs completed' "$fixture/trace"
 rm "$fifo"
 printf '%s\n' 'Special-file classification regression passed.'
 
-# The files backend now owns a directory list rather than a source chain.
-# Enumerating and reading alternate objects must still reach each loose source.
-"$binary" -C "$fixture" init -q alternate
-printf 'alternate object contents\n' | "$binary" -C "$fixture/alternate" hash-object -w --stdin >/dev/null
+# Enumerate and read alternate objects and release each alternate's session
+# before advancing to the next directory.
+for alternate in alternate-a alternate-b; do
+    "$binary" -C "$fixture" init -q "$alternate"
+    printf 'object contents in %s\n' "$alternate" |
+	"$binary" -C "$fixture/$alternate" hash-object -w --stdin >/dev/null
+done
 mkdir -p "$fixture/.git/objects/info"
-printf '%s\n' "$fixture/alternate/.git/objects" >"$fixture/.git/objects/info/alternates"
+printf '%s\n' "$fixture/alternate-a/.git/objects" "$fixture/alternate-b/.git/objects" \
+    >"$fixture/.git/objects/info/alternates"
 VFSI_IMPL=off "$binary" -C "$fixture" cat-file --batch-all-objects --batch >"$fixture/native-alternates"
-VFSI_TRACE=1 VFSI_PREFETCH_OBJECTS=1 VFSI_IMPL=dummy VFSI_LIBRARY="$library" VFSI_ROOT="$fixture" VFSI_MOUNT="$fixture" \
-    "$binary" -C "$fixture" cat-file --batch-all-objects --batch >"$fixture/vector-alternates" 2>"$fixture/trace"
-diff -u "$fixture/native-alternates" "$fixture/vector-alternates"
-test "$(grep -c 'vfsi: listdirs completed' "$fixture/trace")" -ge 2
-printf '%s\n' 'Alternate object-directory enumeration and reads passed.'
+for adapter in "$library" "$fixture/proxy.so"; do
+    VFSI_TEST_SESSION_LOG="$fixture/sessions" VFSI_TRACE=1 VFSI_PREFETCH_OBJECTS=1 \
+	VFSI_IMPL=dummy VFSI_LIBRARY="$adapter" VFSI_ROOT="$fixture" VFSI_MOUNT="$fixture" \
+	"$binary" -C "$fixture" cat-file --batch-all-objects --batch >"$fixture/vector-alternates" 2>"$fixture/trace"
+    diff -u "$fixture/native-alternates" "$fixture/vector-alternates"
+    test "$(grep -c 'vfsi: listdirs completed' "$fixture/trace")" -ge 3
+done
+awk '/^open$/ { opened++ }
+     /^free$/ && opened == 2 { first_released = 1 }
+     END { if (opened != 3 || !first_released) exit 1 }' "$fixture/sessions"
+printf '%s\n' 'Alternate object enumeration, reads, and session cleanup passed.'
 
 # Cursor-specific fault proxies must never export an operation absent from the
 # real library. Keep legacy parity above active for old headers and libraries.

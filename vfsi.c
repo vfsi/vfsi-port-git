@@ -1130,8 +1130,13 @@ int vfsi_for_each_loose_file(struct odb_source *source,
 					    obj_cb, cruft_cb,
 					    subdir_cb, data, flags, result);
 	ctx->traversal_active = 0;
-	/* Cached entries exist only to serve singular calls made by callbacks. */
+	/* Reuse row storage within a scan without retaining one peak cohort
+	 * for every alternate after Git walks to the next source. */
 	vfsi_clear_objects(ctx);
+	FREE_AND_NULL(ctx->objects);
+	ctx->objects_cap = 0;
+	if (vfsi_loose_source(source) != vfsi_loose_source(source->odb->source))
+		vfsi_close_connection(ctx);
 	pthread_mutex_unlock(&ctx->mutex);
 	return rc;
 }

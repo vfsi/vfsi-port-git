@@ -48,7 +48,8 @@ with a shared 200,000-entry/64 MiB path budget for each group. Each group is
 validated before callbacks and released after replay. An overflowing or failed
 group uses Git's ordinary traversal for its directories. A connection failure
 uses ordinary traversal for all remaining directories. Earlier callbacks are
-never replayed. This avoids an all-repository snapshot limit.
+never replayed. Row storage is released at the end of each scan, and each
+alternate's connection closes before the next object directory is scanned.
 
 When the library supplies both optional cursor-identity listing and cursor-free
 symbols, admitted fanout directories retain their parent identity across groups.
