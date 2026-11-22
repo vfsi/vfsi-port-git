@@ -15,21 +15,21 @@ static void *library(void) {
 }
 #define RESOLVE(name) __typeof__(&name) fn; do { void *sym = dlsym(library(), #name); if (!sym) abort(); memcpy(&fn, &sym, sizeof(fn)); } while (0)
 uint32_t vfsi_abi_version(void) { return getenv("VFSI_TEST_BAD_ABI") ? 999 : VFSI_ABI_VERSION; }
-static void session_event(const char *event) {
+static void session_event(const char *event, vfsi_fs *fs) {
     const char *trace = getenv("VFSI_TEST_SESSION_LOG");
     if (trace) {
 	FILE *file = fopen(trace, "a");
 	if (!file) abort();
-	fprintf(file, "%s\n", event);
+	fprintf(file, "%s %p\n", event, (void *)fs);
 	fclose(file);
     }
 }
-void vfsi_free(vfsi_fs *fs) { RESOLVE(vfsi_free); fn(fs); session_event("free"); }
+void vfsi_free(vfsi_fs *fs) { RESOLVE(vfsi_free); session_event("free", fs); fn(fs); }
 int vfsi_dummy_open_mount(const char *a, const char *b, vfsi_fs **out) {
     if (getenv("VFSI_TEST_OPEN_FAIL")) { *out = NULL; return EIO; }
     RESOLVE(vfsi_dummy_open_mount);
     int rc = fn(a,b,out);
-    if (!rc) session_event("open");
+    if (!rc) session_event("open", *out);
     return rc;
 }
 int vfsi_nfs_open_mount_export(const char *a,const char *b,const char *c,vfsi_fs **out) {

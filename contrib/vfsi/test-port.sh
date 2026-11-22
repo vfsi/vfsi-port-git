@@ -27,6 +27,14 @@ for budget in 0 1 67108864; do
 done
 printf '%s\n' 'Git port parity passed (zero, tiny and normal prefetch budgets).'
 
+# A nonexistent library must leave the native result intact.
+VFSI_TRACE=1 VFSI_IMPL=dummy VFSI_LIBRARY="$fixture/missing-vfsi.so" \
+    VFSI_ROOT="$fixture" VFSI_MOUNT="$fixture" \
+    "$binary" -C "$fixture" count-objects -v >"$fixture/actual" 2>"$fixture/trace"
+diff -u "$fixture/expected" "$fixture/actual"
+grep -q 'vfsi: cannot load ' "$fixture/trace"
+if grep -q 'vfsi: listdirs completed' "$fixture/trace"; then exit 1; fi
+
 # A loaded-but-incompatible adapter must not silently masquerade as acceleration.
 include=${VFSI_INCLUDE:-"$repo/build-vfsi-c/vfsi-c-0.3.24/sdk/include"}
 ${CC:-cc} -Wall -Wextra -Werror -I"$include" -I"$repo/contrib/vfsi" \
@@ -198,6 +206,7 @@ mkdir -p "$fixture/.git/objects/info"
 printf '%s\n' "$fixture/alternate-a/.git/objects" "$fixture/alternate-b/.git/objects" \
     >"$fixture/.git/objects/info/alternates"
 VFSI_IMPL=off "$binary" -C "$fixture" cat-file --batch-all-objects --batch >"$fixture/native-alternates"
+: >"$fixture/sessions"
 for adapter in "$library" "$fixture/proxy.so"; do
     VFSI_TEST_SESSION_LOG="$fixture/sessions" VFSI_TRACE=1 VFSI_PREFETCH_OBJECTS=1 \
 	VFSI_IMPL=dummy VFSI_LIBRARY="$adapter" VFSI_ROOT="$fixture" VFSI_MOUNT="$fixture" \
@@ -205,9 +214,24 @@ for adapter in "$library" "$fixture/proxy.so"; do
     diff -u "$fixture/native-alternates" "$fixture/vector-alternates"
     test "$(grep -c 'vfsi: listdirs completed' "$fixture/trace")" -ge 3
 done
-awk '/^open$/ { opened++ }
-     /^free$/ && opened == 2 { first_released = 1 }
-     END { if (opened != 3 || !first_released) exit 1 }' "$fixture/sessions"
+awk '
+$1 == "open" {
+	if (++opened == 1) { primary = $2; next }
+	if (alternate || $2 == primary) exit 1
+	alternate = $2
+}
+$1 == "free" {
+	if ($2 == primary) {
+		if (released != 2 || primary_released) exit 1
+		primary_released = 1
+	} else {
+		if ($2 != alternate) exit 1
+		alternate = ""
+		released++
+	}
+}
+END { if (opened != 3 || released != 2 || alternate) exit 1 }
+' "$fixture/sessions"
 printf '%s\n' 'Alternate object enumeration, reads, and session cleanup passed.'
 
 # Cursor-specific fault proxies must never export an operation absent from the
@@ -302,6 +326,9 @@ for adapter in proxy.so partial-cursors.so; do
     if grep -q 'vfsi: fanout cursors=retained' "$fixture/trace"; then exit 1; fi
 done
 printf '%s\n' 'Retained fanout, bounded groups, late fallback and shared prefetch budget passed.'
+elif test "${VFSI_REQUIRE_CURSOR_API:-0}" = 1; then
+    printf '%s\n' 'The published VFSI SDK must expose the retained cursor listing and free functions.' >&2
+    exit 1
 else
     printf '%s\n' 'Cursor-specific cases unavailable; legacy library parity and fallback passed.'
 fi

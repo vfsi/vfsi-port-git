@@ -57,4 +57,5 @@ jobs:
         env:
           VFSI_LIBRARY: ${{ steps.sdk.outputs.library }}
           VFSI_INCLUDE: ${{ steps.sdk.outputs.include }}
+          VFSI_REQUIRE_CURSOR_API: "1"
         run: sh contrib/vfsi/test-port.sh
