@@ -765,15 +765,9 @@ static int vfsi_prefetch_object_data(struct vfsi_source_context *ctx, size_t *re
 	for (chunk = 0; chunk < next; chunk += 4096) {
 		size_t count = next - chunk < 4096 ? next - chunk : 4096;
 
-		if (vfsi_runtime.bindings.read_paths_with_limit)
-			rc = vfsi_runtime.bindings.read_paths_with_limit(ctx->fs,
-				(const char *const *)&paths[chunk], count,
-				ctx->data_limit - ctx->data_bytes, vfsi_store_read_paths_cb, ctx);
-		else
-			rc = vfsi_runtime.bindings.read_paths(ctx->fs,
-						  (const char *const *)&paths[chunk],
-						  count, vfsi_store_read_paths_cb,
-						  ctx);
+		rc = vfsi_runtime.bindings.read_paths_with_limit(ctx->fs,
+			(const char *const *)&paths[chunk], count,
+			ctx->data_limit - ctx->data_bytes, vfsi_store_read_paths_cb, ctx);
 		if (rc)
 			break;
 	}
@@ -928,7 +922,7 @@ static int vfsi_for_each_loose_file_locked(struct vfsi_source_context *ctx,
 		goto out;
 	prefetch = !(flags & LOOSE_FILES_METADATA_ONLY) &&
 		vfsi_prefetch_enabled() &&
-		(vfsi_runtime.bindings.read_paths || vfsi_runtime.bindings.read_paths_with_limit);
+		vfsi_runtime.bindings.read_paths_with_limit;
 	if (prefetch && vfsi_prefetch_budget(&prefetch_remaining)) {
 		warning(_("vfsi: invalid prefetch budget; using ordinary reads"));
 		prefetch = 0;

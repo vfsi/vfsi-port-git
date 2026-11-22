@@ -133,12 +133,21 @@ EOF
 	diff -u "$fixture/expected" "$fixture/actual"
 	if grep -Eq 'vfsi: (open failed|listdirs completed)' "$fixture/trace"; then exit 1; fi
 fi
-# Metadata acceleration remains useful when an adapter lacks prefetch exports.
-${CC:-cc} -shared -fPIC -DVFSI_TEST_NO_PREFETCH -I"$include" "$repo/contrib/vfsi/test-proxy.c" -ldl -o "$fixture/metadata-only.so"
-VFSI_TRACE=1 VFSI_PREFETCH_OBJECTS=1 VFSI_IMPL=dummy VFSI_LIBRARY="$fixture/metadata-only.so" VFSI_ROOT="$fixture" VFSI_MOUNT="$fixture" \
-    "$binary" -C "$fixture" count-objects -v >"$fixture/actual" 2>"$fixture/trace"
-diff -u "$fixture/expected" "$fixture/actual"
-grep -q 'vfsi: listdirs completed' "$fixture/trace"
+# Metadata acceleration remains useful without a byte-limited payload reader.
+${CC:-cc} -shared -fPIC -DVFSI_TEST_NO_PREFETCH -I"$include" \
+    "$repo/contrib/vfsi/test-proxy.c" -ldl -o "$fixture/metadata-only.so"
+${CC:-cc} -shared -fPIC -DVFSI_TEST_LEGACY_PREFETCH -I"$include" \
+    "$repo/contrib/vfsi/test-proxy.c" -ldl -o "$fixture/legacy-prefetch.so"
+VFSI_IMPL=off "$binary" -C "$fixture" fsck --full --no-dangling >"$fixture/native-fsck"
+for adapter in metadata-only.so legacy-prefetch.so; do
+    VFSI_TEST_CALL_LOG="$fixture/legacy-prefetch-calls" VFSI_TRACE=1 VFSI_IMPL=dummy \
+	VFSI_LIBRARY="$fixture/$adapter" VFSI_ROOT="$fixture" VFSI_MOUNT="$fixture" \
+	VFSI_PREFETCH_OBJECTS=1 VFSI_PREFETCH_BYTES=128 \
+	"$binary" -C "$fixture" fsck --full --no-dangling >"$fixture/actual" 2>"$fixture/trace"
+    diff -u "$fixture/native-fsck" "$fixture/actual"
+    grep -q 'vfsi: listdirs completed' "$fixture/trace"
+    test ! -e "$fixture/legacy-prefetch-calls"
+done
 # Invalid cached timestamps must choose ordinary reads with initialized stat data.
 ${CC:-cc} -shared -fPIC -DVFSI_TEST_NO_IDENTITY -I"$include" "$repo/contrib/vfsi/test-proxy.c" -ldl -o "$fixture/no-identity.so"
 VFSI_TRACE=1 VFSI_PREFETCH_OBJECTS=1 VFSI_IMPL=dummy VFSI_LIBRARY="$fixture/no-identity.so" VFSI_ROOT="$fixture" VFSI_MOUNT="$fixture" \

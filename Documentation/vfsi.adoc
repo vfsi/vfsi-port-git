@@ -34,7 +34,8 @@ directory without a nested mount in its path or subtree. Git rechecks
 that mapping before reusing the connection.
 Direct access does not share the kernel client's caches.
 
-`VFSI_PREFETCH_OBJECTS=1` enables prefetch for object readers.
+`VFSI_PREFETCH_OBJECTS=1` enables prefetch for object readers when the adapter
+supports byte-limited reads.
 `count-objects` skips it.
 `VFSI_PREFETCH_BYTES` bounds prefetched payloads across each loose-object scan (default 64 MiB;
 use decimal bytes, with zero disabling payload prefetch). Only regular files with valid loose-object

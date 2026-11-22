@@ -52,7 +52,18 @@ struct vfsi_result vfsi_get_object_idv(vfsi_fs *fs,const vfsi_object_id_op *ops,
 }
 #endif
 #ifndef VFSI_TEST_NO_PREFETCH
-int vfsi_read_paths(vfsi_fs *fs,const char *const *paths,size_t count,vfsi_read_paths_cb cb,void *data) { RESOLVE(vfsi_read_paths); return fn(fs,paths,count,cb,data); }
+int vfsi_read_paths(vfsi_fs *fs,const char *const *paths,size_t count,vfsi_read_paths_cb cb,void *data) {
+    const char *trace = getenv("VFSI_TEST_CALL_LOG");
+    if (trace) {
+	FILE *file = fopen(trace, "a");
+	if (!file) abort();
+	fputs("legacy-read\n", file);
+	fclose(file);
+    }
+    RESOLVE(vfsi_read_paths);
+    return fn(fs,paths,count,cb,data);
+}
+#ifndef VFSI_TEST_LEGACY_PREFETCH
 struct read_forwarding { vfsi_read_paths_cb cb; void *data; };
 static bool forward_read(const char *path, const unsigned char *bytes, size_t len, void *opaque) {
     struct read_forwarding *state = opaque;
@@ -66,6 +77,7 @@ int vfsi_read_paths_with_limit(vfsi_fs *fs,const char *const *paths,size_t count
     struct read_forwarding state = {cb,data};
     return fn(fs,paths,count,limit,forward_read,&state);
 }
+#endif
 #endif
 struct forwarding {
     vfsi_indexed_listdir_cb callback;
