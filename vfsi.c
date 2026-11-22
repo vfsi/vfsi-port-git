@@ -777,7 +777,7 @@ static int vfsi_for_each_loose_file_locked(struct vfsi_source_context *ctx,
 					   each_loose_object_fn obj_cb,
 					   each_loose_cruft_fn cruft_cb,
 					   each_loose_subdir_fn subdir_cb,
-					   void *data, int *result)
+					   void *data, unsigned int flags, int *result)
 {
 	struct vfsi_walk walk = {
 		.ctx = ctx,
@@ -812,7 +812,8 @@ static int vfsi_for_each_loose_file_locked(struct vfsi_source_context *ctx,
 	rc = open_vfsi(ctx, real_objects);
 	if (rc <= 0)
 		goto out;
-	prefetch = vfsi_prefetch_enabled() &&
+	prefetch = !(flags & LOOSE_FILES_METADATA_ONLY) &&
+		vfsi_prefetch_enabled() &&
 		(vfsi_runtime.bindings.read_paths || vfsi_runtime.bindings.read_paths_with_limit);
 	if (prefetch && vfsi_prefetch_budget(&prefetch_remaining)) {
 		warning(_("vfsi: invalid prefetch budget; using ordinary reads"));
@@ -967,7 +968,7 @@ int vfsi_for_each_loose_file(struct odb_source *source,
 			     each_loose_object_fn obj_cb,
 			     each_loose_cruft_fn cruft_cb,
 			     each_loose_subdir_fn subdir_cb,
-			     void *data, int *result)
+			     void *data, unsigned int flags, int *result)
 {
 	struct vfsi_source_context *ctx;
 	int rc;
@@ -985,7 +986,7 @@ int vfsi_for_each_loose_file(struct odb_source *source,
 	ctx->traversal_active = 1;
 	rc = vfsi_for_each_loose_file_locked(ctx, objects_dir, algop,
 					    obj_cb, cruft_cb,
-					    subdir_cb, data, result);
+					    subdir_cb, data, flags, result);
 	ctx->traversal_active = 0;
 	/* Cached entries exist only to serve singular calls made by callbacks. */
 	vfsi_clear_objects(ctx);

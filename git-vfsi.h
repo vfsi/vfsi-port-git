@@ -21,7 +21,7 @@ int vfsi_for_each_loose_file(struct odb_source *source,
 			     each_loose_object_fn obj_cb,
 			     each_loose_cruft_fn cruft_cb,
 			     each_loose_subdir_fn subdir_cb,
-			     void *data, int *result);
+			     void *data, unsigned int flags, int *result);
 
 int vfsi_fill_stat(struct odb_source *source, const char *path, struct stat *st);
 /* A hit transfers malloc ownership to the caller and optionally returns stat
@@ -40,7 +40,7 @@ static inline int vfsi_for_each_loose_file(struct odb_source *source,
 					   each_loose_object_fn obj_cb,
 					   each_loose_cruft_fn cruft_cb,
 					   each_loose_subdir_fn subdir_cb,
-					   void *data, int *result)
+					   void *data, unsigned int flags, int *result)
 {
 	(void)source;
 	(void)objects_dir;
@@ -49,6 +49,7 @@ static inline int vfsi_for_each_loose_file(struct odb_source *source,
 	(void)cruft_cb;
 	(void)subdir_cb;
 	(void)data;
+	(void)flags;
 	(void)result;
 	return 0;
 }

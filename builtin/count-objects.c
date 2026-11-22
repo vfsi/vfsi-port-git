@@ -121,9 +121,10 @@ int cmd_count_objects(int argc,
 		report_linked_checkout_garbage(the_repository);
 	}
 
-	for_each_loose_file_in_source(the_repository->objects->source,
+	for_each_loose_file_in_source_with_flags(the_repository->objects->source,
 				      count_loose, count_cruft, NULL,
-				      the_repository->objects->source);
+				      the_repository->objects->source,
+						 LOOSE_FILES_METADATA_ONLY);
 
 	if (verbose) {
 		struct packed_git *p;

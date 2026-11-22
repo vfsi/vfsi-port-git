@@ -65,8 +65,7 @@ mv "$fixture/fanout" "$fanout"
 VFSI_TEST_CALL_LOG="$fixture/bad-budget" VFSI_TRACE=1 VFSI_IMPL=dummy \
     VFSI_LIBRARY="$fixture/proxy.so" VFSI_ROOT="$fixture" VFSI_MOUNT="$fixture" \
     VFSI_PREFETCH_OBJECTS=1 VFSI_PREFETCH_BYTES=' -1' \
-    "$binary" -C "$fixture" count-objects -v >"$fixture/actual" 2>"$fixture/trace"
-diff -u "$fixture/expected" "$fixture/actual"
+    "$binary" -C "$fixture" fsck --full >"$fixture/actual" 2>"$fixture/trace"
 grep -q 'invalid prefetch budget' "$fixture/trace"
 grep -q 'vfsi: listdirs completed' "$fixture/trace"
 test ! -e "$fixture/bad-budget"
@@ -166,6 +165,7 @@ int main(int argc, char **argv) {
 C
 ${CC:-cc} -Wall -Wextra -Werror -I"$include" "$fixture/cursor-api.c" -ldl -o "$fixture/cursor-api"
 if "$fixture/cursor-api" "$library"; then
+rm "$fixture/.git/objects/info/alternates"
 # More than two fanout groups expose prefix replay, per-group budget resets,
 # and old-library/partial-symbol fallback. Empty fanouts still count as groups.
 for n in $(seq 0 255); do
@@ -191,11 +191,19 @@ for failure in 0 1 2 11; do
     grep -q 'vfsi: fanout cursors=retained' "$fixture/trace"
     test "$(grep -c '^group ' "$fixture/calls")" -ge 3
     awk '$1=="group" && $3>24 {exit 1}
-	 $1=="read-bytes" {bytes+=$2} END {if(bytes==0 || bytes>512) exit 1}' "$fixture/calls"
+	 $1=="read-bytes" {exit 1}' "$fixture/calls"
     if test "$failure" -ne 0; then
 	grep -q 'vfsi: fanout group fallback' "$fixture/trace"
     fi
 done
+# Content consumers still share one prefetch budget across fanout groups.
+: >"$fixture/calls"
+VFSI_TEST_CALL_LOG="$fixture/calls" VFSI_TRACE=1 VFSI_IMPL=dummy \
+    VFSI_LIBRARY="$fixture/cursors.so" VFSI_ROOT="$fixture" VFSI_MOUNT="$fixture" \
+    VFSI_PREFETCH_OBJECTS=1 VFSI_PREFETCH_BYTES=512 \
+    "$binary" -C "$fixture" fsck --full --no-dangling >"$fixture/actual" 2>"$fixture/trace"
+grep -q 'vfsi: fanout cursors=retained' "$fixture/trace"
+awk '$1=="read-bytes" {bytes+=$2} END {if(bytes==0 || bytes>512) exit 1}' "$fixture/calls"
 # A cursor-listing export without its ownership/free companion must use paths.
 ${CC:-cc} -shared -fPIC -DVFSI_TEST_CURSOR_API -DVFSI_TEST_NO_CURSOR_FREE -I"$include" \
     "$repo/contrib/vfsi/test-proxy.c" -ldl -o "$fixture/partial-cursors.so"

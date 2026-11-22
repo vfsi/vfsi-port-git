@@ -68,6 +68,13 @@ int for_each_loose_file_in_source(struct odb_source *source,
 				  each_loose_cruft_fn cruft_cb,
 				  each_loose_subdir_fn subdir_cb,
 				  void *data);
+/* The callback needs object metadata only, so skip VFSI payload prefetch. */
+#define LOOSE_FILES_METADATA_ONLY (1u << 0)
+int for_each_loose_file_in_source_with_flags(struct odb_source *source,
+					   each_loose_object_fn obj_cb,
+					   each_loose_cruft_fn cruft_cb,
+					   each_loose_subdir_fn subdir_cb,
+					   void *data, unsigned int flags);
 int for_each_file_in_obj_subdir(unsigned int subdir_nr,
 				struct strbuf *path,
 				const struct git_hash_algo *algop,

@@ -30,7 +30,8 @@ version, port, and supported authentication rather than guessing AUTH_SYS.
 An older adapter without discovery keeps Git's ordinary filesystem path.
 Direct access does not share the kernel client's caches.
 
-Loose-object prefetch is optional (`VFSI_PREFETCH_OBJECTS=1`).
+`VFSI_PREFETCH_OBJECTS=1` enables prefetch for object readers.
+`count-objects` skips it.
 `VFSI_PREFETCH_BYTES` bounds prefetched payloads across each loose-object scan (default 64 MiB;
 use decimal bytes, with zero disabling payload prefetch). Only regular files with valid loose-object
 names are selected. Large objects remain on Git's normal read path;

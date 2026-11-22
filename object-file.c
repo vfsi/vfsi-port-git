@@ -1107,11 +1107,11 @@ int for_each_file_in_obj_subdir(unsigned int subdir_nr,
 	return r;
 }
 
-int for_each_loose_file_in_source(struct odb_source *source,
+int for_each_loose_file_in_source_with_flags(struct odb_source *source,
 				  each_loose_object_fn obj_cb,
 				  each_loose_cruft_fn cruft_cb,
 				  each_loose_subdir_fn subdir_cb,
-				  void *data)
+				  void *data, unsigned int flags)
 {
 	struct strbuf buf = STRBUF_INIT;
 	int r, handled, vfsi_result = 0;
@@ -1119,7 +1119,7 @@ int for_each_loose_file_in_source(struct odb_source *source,
 	handled = vfsi_for_each_loose_file(source, source->path,
 					   source->odb->repo->hash_algo,
 					   obj_cb, cruft_cb, subdir_cb,
-					   data, &vfsi_result);
+					   data, flags, &vfsi_result);
 	if (handled)
 		return handled < 0 ? -1 : vfsi_result;
 
@@ -1133,6 +1133,16 @@ int for_each_loose_file_in_source(struct odb_source *source,
 
 	strbuf_release(&buf);
 	return r;
+}
+
+int for_each_loose_file_in_source(struct odb_source *source,
+				  each_loose_object_fn obj_cb,
+				  each_loose_cruft_fn cruft_cb,
+				  each_loose_subdir_fn subdir_cb,
+				  void *data)
+{
+	return for_each_loose_file_in_source_with_flags(source, obj_cb, cruft_cb,
+						       subdir_cb, data, 0);
 }
 
 static int check_stream_oid(git_zstream *stream,
