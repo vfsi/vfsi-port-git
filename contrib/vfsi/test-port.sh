@@ -36,7 +36,7 @@ grep -q 'vfsi: cannot load ' "$fixture/trace"
 if grep -q 'vfsi: listdirs completed' "$fixture/trace"; then exit 1; fi
 
 # A loaded-but-incompatible adapter must not silently masquerade as acceleration.
-include=${VFSI_INCLUDE:-"$repo/build-vfsi-c/vfsi-c-0.3.24/sdk/include"}
+include=${VFSI_INCLUDE:-"$repo/build-vfsi-c/vfsi-c-0.3.25/sdk/include"}
 ${CC:-cc} -Wall -Wextra -Werror -I"$include" -I"$repo/contrib/vfsi" \
     "$repo/contrib/vfsi/test-identity.c" -o "$fixture/test-identity"
 "$fixture/test-identity"
